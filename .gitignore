@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+catboost_info/
+state/*.pkl
+state/stints_cache_*.pkl
+.DS_Store
+*.egg-info/
+.ipynb_checkpoints/
