@@ -85,6 +85,7 @@ from pipeline.bet_confidence import (
     logistic_feature_importance,
 )
 from pipeline.market_disagreement import WalkForwardMarketDisagreementModel, default_disagreement_path
+from pipeline.ats_classifier import ATSClassifier
 
 
 def _series_last_optional_float(df: pd.DataFrame, col: str, default=None):
