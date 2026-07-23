@@ -78,11 +78,22 @@ def _ats_lean_frame(d: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ats_frame(d: pd.DataFrame) -> pd.DataFrame:
+    """Actionable ATS bets with ``ats_win`` / ``ats_push`` always present.
+
+    An empty actionable set still returns those columns so callers can safely
+    filter on ``ats_push`` without KeyError (e.g. confidence-only mode with
+    zero placed bets for a season).
+    """
     from pipeline.bet_selection import actionable_spread_frame, spread_side_series
 
     m = actionable_spread_frame(d)
     if m.empty:
-        return m
+        out = m.copy()
+        if "ats_win" not in out.columns:
+            out["ats_win"] = pd.Series(dtype=int)
+        if "ats_push" not in out.columns:
+            out["ats_push"] = pd.Series(dtype=int)
+        return out
     side = m["_side"] if "_side" in m.columns else spread_side_series(m)
     cover = m["ACTUAL_MARGIN"] + m["MARKET_SPREAD"]
     m = m.copy()
@@ -92,6 +103,15 @@ def _ats_frame(d: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
     m["ats_push"] = (cover == 0).astype(int)
     return m
+
+
+def _non_push_ats(bets: pd.DataFrame) -> pd.DataFrame:
+    """Filter push rows; no-op/empty-safe when ``ats_push`` is missing."""
+    if bets is None or bets.empty:
+        return bets if bets is not None else pd.DataFrame()
+    if "ats_push" not in bets.columns:
+        return bets.iloc[0:0].copy()
+    return bets[bets["ats_push"] == 0]
 
 
 def _ou_frame(d: pd.DataFrame) -> pd.DataFrame:
@@ -143,7 +163,7 @@ def _tight_spread_table(g: pd.DataFrame) -> pd.DataFrame:
     if bets.empty or "MARKET_SPREAD" not in bets.columns:
         return pd.DataFrame()
     tight = bets[bets["MARKET_SPREAD"].abs() <= float(TIGHT_SPREAD_MAX)]
-    tight = tight[tight["ats_push"] == 0]
+    tight = _non_push_ats(tight)
     if tight.empty:
         return pd.DataFrame()
     wp = float(tight["ats_win"].mean())
@@ -212,16 +232,18 @@ def _season_metrics(g: pd.DataFrame) -> dict:
     }
 
     ats = _ats_frame(g)
-    ats_n = int((ats["ats_push"] == 0).sum()) if not ats.empty else 0
+    non_push = _non_push_ats(ats)
+    ats_n = int(len(non_push))
     if ats_n:
-        wp = ats.loc[ats["ats_push"] == 0, "ats_win"].mean()
+        wp = non_push["ats_win"].mean()
         roi = wp * (100.0 / 110.0) - (1 - wp)
     else:
         wp = roi = np.nan
 
     lean = _ats_lean_frame(g)
-    lean_n = int((lean["ats_push"] == 0).sum()) if not lean.empty else 0
-    lean_wp = lean.loc[lean["ats_push"] == 0, "ats_win"].mean() if lean_n else np.nan
+    lean_non_push = _non_push_ats(lean)
+    lean_n = int(len(lean_non_push))
+    lean_wp = lean_non_push["ats_win"].mean() if lean_n else np.nan
 
     ou_n = ou_wp = ou_roi = np.nan
     ou = _ou_frame(g)
@@ -236,7 +258,7 @@ def _season_metrics(g: pd.DataFrame) -> dict:
     max_dd = np.nan
     if "COVER_PROB_CALIBRATED" in g.columns and not ats.empty:
         from pipeline.calibration_metrics import compute_brier, compute_ece
-        bets = ats[ats["ats_push"] == 0].copy()
+        bets = _non_push_ats(ats).copy()
         if len(bets):
             cover_brier = compute_brier(bets["ats_win"].values, bets["COVER_PROB_CALIBRATED"].values)
             cover_ece = compute_ece(bets["ats_win"].values, bets["COVER_PROB_CALIBRATED"].values)
@@ -289,7 +311,7 @@ def _confidence_tier_table(g: pd.DataFrame) -> pd.DataFrame:
     if "CONFIDENCE_TIER" not in g.columns:
         return pd.DataFrame()
     bets = _ats_frame(g)
-    bets = bets[bets["ats_push"] == 0]
+    bets = _non_push_ats(bets)
     if bets.empty:
         return pd.DataFrame()
     rows = []
@@ -323,8 +345,7 @@ def _edge_bucket_table(g: pd.DataFrame, include_ats: bool = True) -> pd.DataFram
         sub = g[g["edge_bucket"] == lbl]
         row = {"bucket": lbl, "n_games": len(sub), "pct_games": len(sub) / len(g) if len(g) else 0}
         if include_ats and "MARKET_SPREAD" in g.columns:
-            bets = _ats_lean_frame(sub)
-            bets = bets[bets["ats_push"] == 0]
+            bets = _non_push_ats(_ats_lean_frame(sub))
             row["n_bets"] = len(bets)
             row["ats_pct"] = bets["ats_win"].mean() if len(bets) else np.nan
             if "WIN_PCT" in sub.columns and len(sub):

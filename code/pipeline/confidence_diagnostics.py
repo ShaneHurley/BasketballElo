@@ -22,7 +22,7 @@ from pipeline.config import (
     MIN_CONFIDENCE_SCORE,
     STATE_DIR,
 )
-from pipeline.diagnostics import _ats_frame, _norm_results, _save_or_show
+from pipeline.diagnostics import _ats_frame, _non_push_ats, _norm_results, _save_or_show
 from pipeline.metrics import BREAKEVEN_ATS
 
 
@@ -32,8 +32,7 @@ def _roi_from_winrate(wp: float) -> float:
 
 def confidence_score_table(df: pd.DataFrame, score_col: str = "CONFIDENCE", n_bins: int = 10) -> pd.DataFrame:
     """ATS win rate and ROI by confidence score deciles."""
-    bets = _ats_frame(_norm_results(df))
-    bets = bets[bets["ats_push"] == 0]
+    bets = _non_push_ats(_ats_frame(_norm_results(df)))
     if bets.empty or score_col not in bets.columns:
         return pd.DataFrame()
     bets = bets.dropna(subset=[score_col])
@@ -65,8 +64,7 @@ def confidence_threshold_grid(
     thresholds=range(50, 66),
     score_col: str = "CONFIDENCE",
 ) -> pd.DataFrame:
-    bets = _ats_frame(_norm_results(df))
-    bets = bets[bets["ats_push"] == 0]
+    bets = _non_push_ats(_ats_frame(_norm_results(df)))
     if bets.empty or score_col not in bets.columns:
         return pd.DataFrame()
     rows = []
@@ -304,8 +302,7 @@ def run_phase_2a_unified_confidence(
             plt.xticks(rotation=20)
             _save_or_show(fig, save_path, "16b_unified_weight_tuning_roi.png")
 
-        bets = _ats_frame(df)
-        bets = bets[bets["ats_push"] == 0]
+        bets = _non_push_ats(_ats_frame(df))
         if not bets.empty and "CONFIDENCE" in bets.columns:
             fig, ax = plt.subplots(figsize=(7, 7))
             rb = reliability_bins(bets["ats_win"].values, bets["CONFIDENCE"].values / 100.0, n_bins=8)
