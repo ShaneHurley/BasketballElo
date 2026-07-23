@@ -112,7 +112,10 @@ def passes_edge_bucket(abs_edge: float, min_edge: float | None = None) -> bool:
 def passes_quantile_width(width: float, max_width: float | None = None) -> bool:
     if width is None or not np.isfinite(width):
         return True
-    cap = MAX_QUANTILE_WIDTH if max_width is None else max_width
+    import pipeline.config as cfg
+    cap = cfg.MAX_QUANTILE_WIDTH if max_width is None else max_width
+    if cap is None:
+        return True
     return float(width) <= float(cap)
 
 
@@ -143,16 +146,18 @@ def passes_edge_avoid_band(
     elo_meta_agreement: float | None = None,
 ) -> bool:
     """False when |edge| is in the configured dead-zone band without Elo agreement."""
-    if EDGE_AVOID_BAND is None:
+    import pipeline.config as cfg
+    band = cfg.EDGE_AVOID_BAND
+    if band is None:
         return True
     if abs_edge is None or not np.isfinite(abs_edge):
         return True
-    lo, hi = EDGE_AVOID_BAND
+    lo, hi = band
     ae = float(abs(abs_edge))
     if not (float(lo) <= ae < float(hi)):
         return True
     agree = float(elo_meta_agreement if elo_meta_agreement is not None else 1.0)
-    return agree >= float(EDGE_AVOID_BAND_MIN_ELO_AGREE)
+    return agree >= float(cfg.EDGE_AVOID_BAND_MIN_ELO_AGREE)
 
 
 def passes_confidence_actionable_gates(

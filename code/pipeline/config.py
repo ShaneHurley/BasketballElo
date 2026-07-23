@@ -168,13 +168,19 @@ CONFIDENCE_MIN_EDGE = 3.0
 CONFIDENCE_EDGE_SCALED = True
 MIN_EDGE_BUCKET = 5.5
 EDGE_STAKE_TIERS = ((5.5, 8.0, 1.0), (8.0, 999.0, 1.5))
-MAX_QUANTILE_WIDTH = 22.0
+# Median model conf width is ~26pts; 22 was over-abstaining (~3% bet rate / 0 bets
+# on early single-season walks). 28 keeps a real uncertainty filter without silence.
+MAX_QUANTILE_WIDTH = 28.0
 # Actionable spread gates (confidence_only and live predict).
-MIN_DISAGREEMENT_TRUST = 0.85
+# 0.70: 0.85 was silencing season-1 walks when Elo/Meta disagree lightly.
+MIN_DISAGREEMENT_TRUST = 0.70
 SKIP_PHANTOM_INJURY = True
-SKIP_TIGHT_SPREAD = True
+# False: |market|<=TIGHT_SPREAD_MAX is common; hard-rejecting it killed most edges.
+# Keep the flag for ablation / research, but do not gate production bets on it.
+SKIP_TIGHT_SPREAD = False
 # Optional dead-zone filter: (lo, hi) absolute edge pts; None disables.
-EDGE_AVOID_BAND = (7.0, 9.5)
+# Was (7.0, 9.5) — that band had the strongest lean ATS in diagnostics; leave off.
+EDGE_AVOID_BAND = None
 EDGE_AVOID_BAND_MIN_ELO_AGREE = 0.5
 USE_TIER_STAKE_GATES = False
 WALKFORWARD_EDGE_MIN_FLOOR = 5.5  # ignored when BET_SELECTION_MODE == confidence_only

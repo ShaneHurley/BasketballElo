@@ -18,9 +18,12 @@ MODULE_ORDER = [
     "travel", "fatigue", "team_elo", "lineup_elo", "chemistry",
     "lineup_composite", "hapm", "refs", "calibrators", "stint_context",
     "game_updates", "elo_calibration", "cv", "venn_abers", "bet_confidence",
-    "bet_selection", "artifacts", "market_targets", "market_disagreement", "stake_profiles",
-    "model", "metrics", "calibration_metrics", "ml_calibration", "game_features", "features",
-    "tuning", "tuning_cache", "calibration_policy", "ats_classifier",
+    "bet_selection", "artifacts", "market_targets", "market_disagreement",
+    "market_snapshots", "devig", "bet_grading", "stake_profiles",
+    "oof", "model", "metrics", "calibration_metrics", "ml_calibration",
+    "game_features", "features",
+    "tuning", "tuning_cache", "calibration_policy", "calibration_registry",
+    "ats_classifier",
     "team_volatility", "simulate", "predict", "backtest", "ablation",
     "ablation_posthoc", "edge_analysis", "diagnostics", "ml_diagnostics",
     "confidence_diagnostics", "monitoring", "shap_prune",
@@ -65,8 +68,9 @@ Each phase **saves artifacts to disk** and can **reload them** on the next sessi
 - **Multi-window form** — 3/5/10/20/season rolling + nonlinear rest buckets
 - **confidence_only spread selection** — all edges visible; calibrated confidence gates bets
 - **ATS classifier blend** — always mixed into cover prob before confidence calibration
-- **Actionable gates** — `MIN_DISAGREEMENT_TRUST`, phantom injury, quantile width, tight spread, edge dead-zone band
+- **Actionable gates** — disagreement trust, phantom injury, quantile width (optional tight-spread / edge-band)
 - **Edge-scaled confidence** — small edges need higher confidence (`CONFIDENCE_EDGE_SCALED`)
+- **Defaults tuned for early walks** — `MAX_QUANTILE_WIDTH=28`, `EDGE_AVOID_BAND=None`, `SKIP_TIGHT_SPREAD=False`
 - **Season-1 calibrator** — fit on training calib split before first simulated season
 - **Total-head sanity cap** — skip unstable total refits when CV MAE > `TOTAL_HEAD_CV_SANITY_CAP`
 - **Phase 2a** unified confidence tuning (prior-year only, gated ROI objective)
@@ -119,6 +123,9 @@ def _strip_pipeline_imports(src: str) -> str:
                         name, alias = [x.strip() for x in part.split(" as ", 1)]
                         out.append(f"{alias} = {name}")
                     # bare names already defined in inlined config cell
+            continue
+        if stripped.startswith("from pipeline import "):
+            # e.g. "from pipeline import config as cfg" — drop; cfg.X rewritten below
             continue
         if stripped.startswith("from pipeline.") or stripped.startswith("import pipeline"):
             continue

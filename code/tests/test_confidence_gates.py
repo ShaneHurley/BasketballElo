@@ -32,11 +32,12 @@ def test_passes_edge_avoid_band(monkeypatch):
 def test_passes_confidence_actionable_gates(monkeypatch):
     monkeypatch.setattr(cfg, "CONFIDENCE_SELECTION_MODE", "min_score")
     monkeypatch.setattr(cfg, "CONFIDENCE_EDGE_SCALED", False)
-    monkeypatch.setattr(cfg, "MIN_DISAGREEMENT_TRUST", 0.85)
+    monkeypatch.setattr(cfg, "MIN_DISAGREEMENT_TRUST", 0.70)
     monkeypatch.setattr(cfg, "SKIP_PHANTOM_INJURY", True)
-    monkeypatch.setattr(cfg, "SKIP_TIGHT_SPREAD", True)
+    monkeypatch.setattr(cfg, "SKIP_TIGHT_SPREAD", True)  # exercise gate even if default is off
     monkeypatch.setattr(cfg, "EDGE_AVOID_BAND", None)
     monkeypatch.setattr(cfg, "CONFIDENCE_MIN_EDGE", 3.0)
+    monkeypatch.setattr(cfg, "MAX_QUANTILE_WIDTH", 22.0)
     assert passes_confidence_actionable_gates(
         lean="Home",
         edge_pts=6.0,

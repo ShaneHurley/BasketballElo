@@ -77,6 +77,16 @@ def _ats_lean_frame(d: pd.DataFrame) -> pd.DataFrame:
     return m
 
 
+def _ensure_ats_outcome_columns(m: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee ``ats_win`` / ``ats_push`` exist (empty-frame safe)."""
+    out = m.copy() if m is not None else pd.DataFrame()
+    if "ats_win" not in out.columns:
+        out["ats_win"] = pd.Series(dtype=int)
+    if "ats_push" not in out.columns:
+        out["ats_push"] = pd.Series(dtype=int)
+    return out
+
+
 def _ats_frame(d: pd.DataFrame) -> pd.DataFrame:
     """Actionable ATS bets with ``ats_win`` / ``ats_push`` always present.
 
@@ -87,13 +97,8 @@ def _ats_frame(d: pd.DataFrame) -> pd.DataFrame:
     from pipeline.bet_selection import actionable_spread_frame, spread_side_series
 
     m = actionable_spread_frame(d)
-    if m.empty:
-        out = m.copy()
-        if "ats_win" not in out.columns:
-            out["ats_win"] = pd.Series(dtype=int)
-        if "ats_push" not in out.columns:
-            out["ats_push"] = pd.Series(dtype=int)
-        return out
+    if m is None or m.empty:
+        return _ensure_ats_outcome_columns(m if m is not None else pd.DataFrame())
     side = m["_side"] if "_side" in m.columns else spread_side_series(m)
     cover = m["ACTUAL_MARGIN"] + m["MARKET_SPREAD"]
     m = m.copy()
@@ -102,16 +107,16 @@ def _ats_frame(d: pd.DataFrame) -> pd.DataFrame:
         | ((side == "Away") & (cover < 0))
     ).astype(int)
     m["ats_push"] = (cover == 0).astype(int)
-    return m
+    return _ensure_ats_outcome_columns(m)
 
 
 def _non_push_ats(bets: pd.DataFrame) -> pd.DataFrame:
     """Filter push rows; no-op/empty-safe when ``ats_push`` is missing."""
     if bets is None or bets.empty:
-        return bets if bets is not None else pd.DataFrame()
+        return _ensure_ats_outcome_columns(bets if bets is not None else pd.DataFrame())
     if "ats_push" not in bets.columns:
-        return bets.iloc[0:0].copy()
-    return bets[bets["ats_push"] == 0]
+        return _ensure_ats_outcome_columns(bets.iloc[0:0])
+    return bets[bets["ats_push"] == 0].copy()
 
 
 def _ou_frame(d: pd.DataFrame) -> pd.DataFrame:
@@ -426,6 +431,75 @@ def _save_or_show(fig, save_dir: Path | None, name: str):
         plt.show()
 
 
+def _print_gate_attrition(g: pd.DataFrame) -> None:
+    """Explain zero actionable ATS bets via successive confidence-gate filters."""
+    import pipeline.config as cfg
+
+    n = len(g)
+    if n == 0:
+        return
+    edge = pd.to_numeric(g.get("EDGE"), errors="coerce").abs()
+    conf = pd.to_numeric(
+        g["CONFIDENCE"] if "CONFIDENCE" in g.columns else g.get("WIN_PCT"),
+        errors="coerce",
+    )
+    width = pd.to_numeric(
+        g["CONF_WIDTH"] if "CONF_WIDTH" in g.columns else g.get("SPREAD_QUANTILE_WIDTH"),
+        errors="coerce",
+    )
+    mkt = pd.to_numeric(g.get("MARKET_SPREAD"), errors="coerce").abs()
+    trust = pd.to_numeric(g.get("DISAGREEMENT_TRUST"), errors="coerce").fillna(1.0)
+    phantom = pd.to_numeric(g.get("PHANTOM_INJURY_FLAG"), errors="coerce").fillna(0).astype(bool)
+
+    has_odds = mkt.notna()
+    pass_edge = has_odds & edge.notna() & (edge >= float(cfg.CONFIDENCE_MIN_EDGE))
+    floor = float(cfg.MIN_CONFIDENCE_SCORE)
+    if cfg.CONFIDENCE_EDGE_SCALED:
+        need = np.where(edge < 5.0, floor + 4.0, np.where(edge < 8.0, floor + 2.0, floor))
+    else:
+        need = floor
+    pass_conf = pass_edge & conf.notna() & (conf >= need)
+    if cfg.MAX_QUANTILE_WIDTH is None:
+        pass_width = pass_conf
+    else:
+        pass_width = pass_conf & (width.isna() | (width <= float(cfg.MAX_QUANTILE_WIDTH)))
+    pass_trust = pass_width & (trust >= float(cfg.MIN_DISAGREEMENT_TRUST))
+    pass_phantom = pass_trust & (~phantom) if cfg.SKIP_PHANTOM_INJURY else pass_trust
+    pass_tight = (
+        pass_phantom & (mkt > float(cfg.TIGHT_SPREAD_MAX))
+        if cfg.SKIP_TIGHT_SPREAD
+        else pass_phantom
+    )
+    band = cfg.EDGE_AVOID_BAND
+    if band is not None:
+        lo, hi = band
+        in_band = (edge >= float(lo)) & (edge < float(hi))
+        agree = pd.to_numeric(g.get("ELO_META_AGREEMENT"), errors="coerce").fillna(1.0)
+        pass_band = pass_tight & (~in_band | (agree >= float(cfg.EDGE_AVOID_BAND_MIN_ELO_AGREE)))
+    else:
+        pass_band = pass_tight
+
+    print("  ⚠️  0 ATS bets — gate attrition (rows surviving each filter):")
+    print(f"     games={n:,}  |edge|>={cfg.CONFIDENCE_MIN_EDGE}: {int(pass_edge.sum()):,}")
+    print(
+        f"     + conf>={cfg.MIN_CONFIDENCE_SCORE}"
+        f"{' (edge-scaled)' if cfg.CONFIDENCE_EDGE_SCALED else ''}: {int(pass_conf.sum()):,}"
+    )
+    print(f"     + width<={cfg.MAX_QUANTILE_WIDTH}: {int(pass_width.sum()):,}")
+    print(f"     + trust>={cfg.MIN_DISAGREEMENT_TRUST}: {int(pass_trust.sum()):,}")
+    if cfg.SKIP_PHANTOM_INJURY:
+        print(f"     + no phantom injury: {int(pass_phantom.sum()):,}")
+    if cfg.SKIP_TIGHT_SPREAD:
+        print(f"     + |market|>{cfg.TIGHT_SPREAD_MAX}: {int(pass_tight.sum()):,}")
+    print(f"     + edge avoid band {band}: {int(pass_band.sum()):,}")
+    if width.notna().any():
+        print(
+            f"     conf width: median={float(width.median()):.1f}  "
+            f"p90={float(width.quantile(0.9)):.1f}  "
+            f"(cap={cfg.MAX_QUANTILE_WIDTH})"
+        )
+
+
 def run_backtest_diagnostics(
     results_df: pd.DataFrame,
     save_dir: str | Path | None = None,
@@ -475,6 +549,8 @@ def run_backtest_diagnostics(
         print(f"  close games: ≤3pt={m['pct_decided_3']:.1%}  ≤5pt={m['pct_decided_5']:.1%}  ≤7pt={m['pct_decided_7']:.1%}")
         print(f"  edge |model-market|: mean={m['edge_mean']:.2f}  median={m['edge_median']:.2f}  p90={m['edge_p90']:.2f}")
         print(f"  ATS bets={m['n_bets']:,}  win%={m['ats_pct']:.1%}  ROI={m['roi']:+.1%}  (break-even={BREAKEVEN:.1%})")
+        if int(m["n_bets"] or 0) == 0:
+            _print_gate_attrition(g)
         if not eb.empty:
             print("  edge buckets (|edge| pts):")
             for _, r in eb.iterrows():
