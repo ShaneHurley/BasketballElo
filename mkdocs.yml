@@ -9,27 +9,35 @@ theme:
   name: material
   palette:
     - scheme: slate
-      primary: indigo
-      accent: amber
+      primary: black
+      accent: blue
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
     - scheme: default
-      primary: indigo
-      accent: amber
+      primary: white
+      accent: blue
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
   features:
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.top
+    - navigation.indexes
+    - navigation.footer
     - search.suggest
+    - search.highlight
     - content.code.copy
+    - content.tabs.link
     - toc.follow
-  font:
-    text: Inter
-    code: JetBrains Mono
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/carbon.css
 
 plugins:
   - search

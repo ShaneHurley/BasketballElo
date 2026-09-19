@@ -1,3 +1,5 @@
+<p class="carbon-eyebrow">NBA analytics &nbsp;/&nbsp; walk-forward ML</p>
+
 # BasketballElo
 
 Leak-aware NBA spread prediction — from a five-year Elo side project to a walk-forward, modular Python pipeline with a formal leak registry.
@@ -5,15 +7,39 @@ Leak-aware NBA spread prediction — from a five-year Elo side project to a walk
 !!! tip "What hiring managers should notice"
     This project is not about claiming a magic ATS percentage. It is about **distrusting a good-looking backtest**, documenting every chronological leak found, and rebuilding until the evaluation would survive a skeptical review.
 
-## At a glance
+<div class="carbon-grid" markdown>
+<div class="carbon-tile" markdown>
 
-| | |
-|---|---|
-| Package | `code/pipeline/` — **98 modules** |
-| Tests | **100+** pytest modules under `code/tests/` |
-| Headline artifact | [`LEAK_REGISTRY.md`](leaks.md) |
-| Live tooling | FastAPI [T-60 dashboard](dashboard.md) |
-| Training | Staged [`run_full_suite.py`](pipeline.md) (stages 0–8) |
+### 98
+
+Modules in `code/pipeline/`
+
+</div>
+<div class="carbon-tile" markdown>
+
+### 100+
+
+Pytest regression modules
+
+</div>
+<div class="carbon-tile" markdown>
+
+### 11
+
+Confirmed leaks, documented & tested
+
+</div>
+<div class="carbon-tile" markdown>
+
+### 0–8
+
+Staged suite phases with an anti-overfit review stop
+
+</div>
+</div>
+
+[:octicons-mark-github-16: View source](https://github.com/ShaneHurley/BasketballElo){ .md-button }
+[Read the leak registry](leaks.md){ .md-button .md-button--secondary }
 
 ## Architecture
 
