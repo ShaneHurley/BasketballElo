@@ -59,21 +59,52 @@ class LineupEloTracker:
 
     def update_stint(self, off_ids, def_ids, xpts_off, xpts_def, possessions,
                      player_tracker=None, is_home_offense=True):
+        """Train both lineups from a single stint.
+
+        A stint carries scoring for both directions at once: ``off_ids``
+        scored ``xpts_off`` against ``def_ids`` (who were defending), and
+        ``def_ids`` scored ``xpts_def`` against ``off_ids`` (who were
+        defending), both over the same ``possessions`` window — mirrors
+        ``hierarchical.py``'s single-call, both-sides ``_apply_update``.
+
+        P0.1 bug: only ``key_off`` (the home lineup passed in as
+        ``off_ids``) was ever updated, and its own ``dff`` was clobbered
+        with half of its *own* offensive error instead of the opposing
+        lineup's actual defensive performance. Now each lineup's ``off``
+        is trained from its own scoring, and each lineup's ``dff`` is
+        trained from what its opponent scored against it.
+        """
         if possessions <= 0:
             return
-        key_off = self._key(off_ids)
-        if len(key_off) < 5:
+        key_a = self._key(off_ids)
+        key_b = self._key(def_ids)
+        if len(key_a) < 5 or len(key_b) < 5:
             return
-        exp_margin, _ = self.expected_margin(off_ids, def_ids, possessions, player_tracker, is_home_offense)
-        act_margin = (xpts_off - xpts_def) * possessions / max(possessions, 1)
-        err = (xpts_off / possessions - self.league_xppp) * possessions if possessions else 0
-        p_off, _ = self._player_sum(key_off, player_tracker)
-        residual = err - (p_off - 1500.0) / self.scaling * possessions
-        k = 0.15 * possessions / (self.poss[key_off] + possessions + SHRINK_K)
-        self.off[key_off] += k * err
-        self.dff[key_off] += k * (-err * 0.5)
-        self.chemistry[key_off] = 0.9 * self.chemistry.get(key_off, 0) + 0.1 * residual
-        self.poss[key_off] += possessions
+
+        err_a = (xpts_off / possessions - self.league_xppp) * possessions
+        err_b = (xpts_def / possessions - self.league_xppp) * possessions
+
+        p_off_a, _ = self._player_sum(key_a, player_tracker)
+        p_off_b, _ = self._player_sum(key_b, player_tracker)
+        residual_a = err_a - (p_off_a - 1500.0) / self.scaling * possessions
+        residual_b = err_b - (p_off_b - 1500.0) / self.scaling * possessions
+
+        k_a = 0.15 * possessions / (self.poss[key_a] + possessions + SHRINK_K)
+        k_b = 0.15 * possessions / (self.poss[key_b] + possessions + SHRINK_K)
+
+        # A's offense trained on what A scored; B's defense trained on the
+        # same actual outcome (B allowed err_a worth of over/under-performance).
+        self.off[key_a] += k_a * err_a
+        self.dff[key_b] += k_b * (-err_a)
+        # B's offense trained on what B scored; A's defense trained on it.
+        self.off[key_b] += k_b * err_b
+        self.dff[key_a] += k_a * (-err_b)
+
+        self.chemistry[key_a] = 0.9 * self.chemistry.get(key_a, 0) + 0.1 * residual_a
+        self.chemistry[key_b] = 0.9 * self.chemistry.get(key_b, 0) + 0.1 * residual_b
+
+        self.poss[key_a] += possessions
+        self.poss[key_b] += possessions
 
     def feature_dict(self, home_ids, away_ids, player_tracker=None):
         ho, hd, hc, hn = self.lineup_rating(home_ids, player_tracker)

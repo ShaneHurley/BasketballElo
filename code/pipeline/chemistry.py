@@ -35,27 +35,55 @@ class ChemistryTracker:
 
     def update_stint(self, off_ids, def_ids, xpts_off, xpts_def, possessions,
                      player_tracker=None, expected_ppp=None):
+        """Train chemistry residuals for a stint.
+
+        A stint carries scoring information for *both* directions
+        simultaneously: ``off_ids`` scored ``xpts_off`` points against
+        ``def_ids`` over ``possessions``, and ``def_ids`` scored
+        ``xpts_def`` points against ``off_ids`` over the same
+        ``possessions`` window (mirrors ``hierarchical.py``'s single-call,
+        both-sides update). Training only the ``off_ids`` side here was the
+        P0.1 bug: the away lineup never accumulated duo/trio residuals or
+        on/off-court history, and the home lineup's `on_off["off"]` leg
+        (points allowed while on defense) was never written either.
+        """
         if possessions <= 0:
             return
-        act_ppp = xpts_off / possessions
         exp = expected_ppp if expected_ppp is not None else self.league_xppp
+        # off_ids on offense (scoring xpts_off) <-> def_ids on defense.
+        self._train_side(off_ids, def_ids, xpts_off, possessions, exp)
+        # def_ids on offense (scoring xpts_def) <-> off_ids on defense.
+        self._train_side(def_ids, off_ids, xpts_def, possessions, exp)
+
+    def _train_side(self, ids, opp_ids, xpts, possessions, exp):
+        """Train one direction: ``ids`` was the offense that scored ``xpts``
+        over ``possessions``; ``opp_ids`` was defending against it."""
+        act_ppp = xpts / possessions
         residual = act_ppp - exp
-        ids = [str(x) for x in off_ids if x and str(x) != "nan"]
-        for a, b in itertools.combinations(ids, 2):
+        ids_c = [str(x) for x in ids if x and str(x) != "nan"]
+        for a, b in itertools.combinations(ids_c, 2):
             k = self._duo_key(a, b)
             w = 0.08 * possessions / (self.duo_poss[k] + possessions + SHRINK)
             self.duo_off[k] += w * residual
             self.duo_poss[k] += possessions
-        if len(ids) >= 3:
-            for trio in itertools.combinations(ids, 3):
+        if len(ids_c) >= 3:
+            for trio in itertools.combinations(ids_c, 3):
                 tk = self._trio_key(trio)
                 w = 0.05 * possessions / (self.trio_poss[tk] + possessions + SHRINK)
                 self.trio_off[tk] += w * residual
                 self.trio_poss[tk] += possessions
-        for pid in ids:
+        for pid in ids_c:
             st = self.on_off[pid]
             st["on"] += act_ppp * possessions
             st["on_p"] += possessions
+        # Off-court-offense leg: the opponent was on the floor defending
+        # while `ids` produced `act_ppp`, i.e. this is what the opponent's
+        # lineup allowed while on defense.
+        opp_c = [str(x) for x in opp_ids if x and str(x) != "nan"]
+        for pid in opp_c:
+            st = self.on_off[pid]
+            st["off"] += act_ppp * possessions
+            st["off_p"] += possessions
 
     def _duo_net(self, lineup):
         ids = [str(x) for x in lineup if x and str(x) != "nan"]
@@ -79,7 +107,13 @@ class ChemistryTracker:
             if not st or st["on_p"] < 30:
                 continue
             on_ppp = st["on"] / st["on_p"]
-            nets.append(on_ppp - self.league_xppp)
+            if st.get("off_p", 0.0) >= 30:
+                off_ppp = st["off"] / st["off_p"]
+                nets.append(on_ppp - off_ppp)
+            else:
+                # Off-court-offense leg not yet warmed up: fall back to the
+                # league-average baseline rather than dropping the player.
+                nets.append(on_ppp - self.league_xppp)
         return float(np.mean(nets)) if nets else 0.0
 
     def _trio_net(self, lineup):
