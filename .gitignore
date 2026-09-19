@@ -52,3 +52,4 @@ site/
 .env
 .env.*
 *.pem
+.venv_docs/

@@ -1,0 +1,6 @@
+# Dev / CI tooling (also available via: pip install -e ".[dev]")
+pytest>=7.4
+pytest-cov>=4.1
+ruff>=0.5
+mypy>=1.8
+pre-commit>=3.6
