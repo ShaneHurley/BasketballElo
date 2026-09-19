@@ -559,11 +559,11 @@ def market_microstructure_features(spread_move, public_home_pct, market_spread=n
         elif sm < 0 and pub > 0.55:
             rlm = abs(sm)
     steam = int(abs(sm) >= 1.0)
-    fair_spread = market_spread  # placeholder when single-book; extend with multi-book de-vig
+    fair_spread = market_spread  # raw single-book spread; NOT vig-free (no multi-book de-vig applied yet)
     return {
         "reverse_line_movement": rlm,
         "steam_flag": steam,
-        "fair_spread_vigfree": fair_spread if pd.notna(fair_spread) else 0.0,
+        "market_spread_raw": fair_spread if pd.notna(fair_spread) else 0.0,
         "public_away_pct": 1.0 - pub,
     }
 

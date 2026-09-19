@@ -68,7 +68,7 @@ def engine_implied_margins(elo_tracker, hier_engine,
     # must keep reading the tracker's tuned dict, not notebook globals.
     elo_cfg = getattr(elo_tracker, "cfg", {}) or {}
     scaling = elo_cfg.get("ELO_SCALING_FACTOR", 1000) or 1000
-    hb = elo_cfg.get("HOME_PPP_BOOST", 0.024)
+    hb = elo_cfg["HOME_PPP_BOOST"]
     lx = getattr(elo_tracker, "league_xppp", 1.10)
     exp_ppp_h = lx + hb + (ho_off - ao_def) / scaling
     exp_ppp_a = lx - hb + (ao_off - ho_def) / scaling

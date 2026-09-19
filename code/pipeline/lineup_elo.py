@@ -12,7 +12,8 @@ SHRINK_K = 100.0
 class LineupEloTracker:
     """Stores offensive/defensive rating per sorted 5-tuple with James-Stein shrinkage."""
 
-    def __init__(self, league_xppp: float = 1.10, scaling: float = 1000.0, home_boost: float = 0.024):
+    def __init__(self, league_xppp: float = 1.10, scaling: float = 1000.0, home_boost: float = 0.002):
+        # matches config.py HOME_PPP_BOOST
         self.league_xppp = league_xppp
         self.scaling = scaling
         self.home_boost = home_boost

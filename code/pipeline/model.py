@@ -412,12 +412,12 @@ EXTENDED_FEATURE_COLS = [
     "h_travel_miles_7d", "a_travel_miles_7d", "travel_miles_diff", "h_tz_shift", "a_tz_shift",
     "h_road_trip", "a_road_trip",
     "h_fatigue_index", "a_fatigue_index", "fatigue_diff",
-    "reverse_line_movement", "steam_flag", "fair_spread_vigfree", "public_away_pct",
+    "reverse_line_movement", "steam_flag", "market_spread_raw", "public_away_pct",
     "h_star_out", "a_star_out", "epm_prior_diff", "epm_blend_off_diff",
     "ref_pace_bias", "ref_foul_bias",
 ]
 
-MARKET_MICRO_COLS = ["reverse_line_movement", "steam_flag", "fair_spread_vigfree", "public_away_pct"]
+MARKET_MICRO_COLS = ["reverse_line_movement", "steam_flag", "market_spread_raw", "public_away_pct"]
 
 # Features that encode the decision/T-60 line. Under ``decision_residual``
 # training these let the stack learn r̂ ≈ k·decision_spread; subtracting the
@@ -425,7 +425,7 @@ MARKET_MICRO_COLS = ["reverse_line_movement", "steam_flag", "fair_spread_vigfree
 LINE_DERIVED_FEATURE_COLS = [
     "elo_vs_market",
     "elo_edge_pts",
-    "fair_spread_vigfree",
+    "market_spread_raw",
     *MARKET_MICRO_COLS,
     "public_home_pct",
     "spread_move",
@@ -475,7 +475,7 @@ WIN_FEATURE_COLS = [
     "h_3in4", "a_3in4", "travel_miles_diff", "h_fatigue_index", "a_fatigue_index", "fatigue_diff",
     "h_travel_rest_interaction", "a_travel_rest_interaction",
     "spread_move", "public_home_pct", "market_fair_win_prob",
-    "fair_spread_vigfree", "reverse_line_movement", "steam_flag",
+    "market_spread_raw", "reverse_line_movement", "steam_flag",
     "uncertainty_diff", "h_rating_uncertainty", "a_rating_uncertainty",
     "h_recent_net", "a_recent_net", "recent_diff",
     "sos_diff",

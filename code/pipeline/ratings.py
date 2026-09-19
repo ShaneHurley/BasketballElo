@@ -510,8 +510,6 @@ class PlayerRatingTracker:
             weight *= gt_w
         elif period >= 4 and abs(margin) >= 15:
             weight *= gt_w
-        if abs(margin) >= 25:
-            weight *= gt_w
         weight *= (0.7 + 0.3 * season_progress)
         return weight
 
