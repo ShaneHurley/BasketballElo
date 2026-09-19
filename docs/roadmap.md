@@ -14,7 +14,7 @@ the epics as numbered.*
 
 | Phase | Name | Contents |
 | ----- | ---- | -------- |
-| 0 | Stop the bleeding (remaining P0s) | P0.1, P0.3, P0.4, P0.5, P0.6, P0.11 |
+| 0 | Stop the bleeding (remaining P0s) | P0.5 (deferred to Epic 9.1), P0.11 (diagnostic, still open) |
 | 1 | Quick wins | 11.4 (wire `update_residuals`), 11.5 (HAPM real shrink) |
 | 2 | Test bench | Epic 10 (synthetic formula test bench) — must be green before any new feature work |
 | 3 | Wire what exists | Epic 7 (devig/Kelly/VA wiring, EPM+minutes, monitoring, min-sample floors) |
@@ -52,10 +52,11 @@ behavior **today** — they outrank every epic below. Rule: fix P0s top-down, ad
 test per fix, and record each in `code/LEAK_REGISTRY.md` (broaden registry scope to confirmed
 non-temporal defects — see Epic 6 addition).*
 
-**Fixed: 5/11 (P0.2, P0.7, P0.8, P0.9, P0.10). Remaining open: 6/11 (P0.1, P0.3, P0.4, P0.5,
-P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
+**Fixed: 9/11 (P0.1, P0.2, P0.3, P0.4, P0.6, P0.7, P0.8, P0.9, P0.10). Documented limitation /
+deferred: 1/11 (P0.5 → Epic 9.1 Kalman). Remaining open: 1/11 (P0.11 diagnostic) — see
+[Execution order](#execution-order) Phase 0.**
 
-### P0.1 — Chemistry & lineup-Elo train on home lineups only *(critical)*
+### P0.1 — Chemistry & lineup-Elo train on home lineups only *(critical)* — **Fixed** (`test_bench_lineup_chemistry.py`, green)
 - **Evidence:** `code/pipeline/game_updates.py:120-123` is the only call site:
   `chemistry_tracker.update_stint(hp, ap, xh, xa, ...)` and
   `lineup_elo_tracker.update_stint(hp, ap, xh, xa, ..., True)` are each called **once per
@@ -82,7 +83,7 @@ P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
 - **Fix:** `b = 100.0/abs(juice) if juice < 0 else juice/100.0`; property test vs
   `american_to_decimal` (`b == dec - 1`) across a juice grid.
 
-### P0.3 — Moneyline de-vig silently no-ops on single-sided feeds *(high)*
+### P0.3 — Moneyline de-vig silently no-ops on single-sided feeds *(high)* — **Fixed** (`test_bench_p0_ml_devig.py`, green)
 - **Evidence:** `market.py:280-296` `fair_probs_from_ml_pair`: when `market_ml_away` is missing,
   `p_away = implied_probability(-market_ml_home)` — American-odds negation sums to exactly 1.0,
   so `devig_two_way` (`market.py:270-277`) normalizes by 1.0 and does nothing. Every downstream
@@ -92,7 +93,7 @@ P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
   league-average vig factor) or flag `ml_fair_probs_estimated=True` and exclude from ML
   calibration targets; never present negation output as de-vigged.
 
-### P0.4 — Elo calibrator prediction interval is frozen at ±12 pts *(medium-high)*
+### P0.4 — Elo calibrator prediction interval is frozen at ±12 pts *(medium-high)* — **Fixed** (`test_bench_p0_interval_updates.py`, green)
 - **Evidence:** `elo_calibration.py:238-244` `predict_interval` reads `self._resid_q` default
   12.0; `update_residuals` (`elo_calibration.py:243`) is **never called anywhere** in
   `code/pipeline/` (grep-confirmed; only occurrence besides the definition is the legacy colab
@@ -101,7 +102,7 @@ P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
   and route callers to `SpreadCalibrator.predict_interval` (`market.py:1271-1278`), which
   already implements a working rolling-quantile interval.
 
-### P0.5 — Player RD is a games-played counter, not Glicko-2 uncertainty *(medium-high)*
+### P0.5 — Player RD is a games-played counter, not Glicko-2 uncertainty *(medium-high)* — **Documented limitation** (deferred to Epic 9.1 Kalman; `ratings.py` docstring; `bench_rd_games_played_proxy`)
 - **Evidence:** `ratings.py:485-500`: `rd_new = rd * (0.99 + 0.02 * min(abs_err, 0.15))` —
   multiplier ∈ [0.99, 0.993], so RD **always shrinks** regardless of outcome surprise, hitting
   its floor in ~244 stints (< 1 season). Combined with `k_mult = max(0.5, 2.0*exp(-games/24.4))`
@@ -112,7 +113,7 @@ P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
   `r(poss)`, gain `K = rd²/(rd²+r)`) — see Epic 9.1. Until then, stop feeding RD-derived
   features to the model as if they were uncertainty.
 
-### P0.6 — HAPM "shrinkage" is a constant, not empirical Bayes *(medium)*
+### P0.6 — HAPM "shrinkage" is a constant, not empirical Bayes *(medium)* — **Fixed** (`test_bench_p0_hapm_shrink.py`, green)
 - **Evidence:** `hapm.py:71,76`: `coef * (SHRINK / (SHRINK + 50))` = `80/130 ≈ 0.615` applied to
   every dyad/trio coefficient regardless of possession count — no `n` in the formula. A 5,000-
   possession duo and a barely-seen duo get identical damping.
@@ -150,7 +151,7 @@ P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
 - **Fix:** rename to `market_spread_raw` until real multi-book de-vig exists (Epic 5.1), or
   drop the column.
 
-### P0.11 — CLV is dead in the latest full run — investigate before trusting ROI *(high, diagnostic)*
+### P0.11 — CLV is dead in the latest full run — investigate before trusting ROI *(high, diagnostic)* — **Open** (no `odds_provenance.json` / `n_actionable=0` diagnosis this phase)
 - **Evidence:** `output/20260914_224422_dash_standard/checkpoints/review.json`:
   `n_actionable: 0`, `n_finite_clv: 0`, `mean_clv: NaN` across 5,247 backtest games (spread MAE
   11.51 ± 0.64, ECE 0.065). Likely downstream of the still-`confirmed` `quote_tip_proxy` leak
