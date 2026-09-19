@@ -43,7 +43,7 @@ SCORE_MARKET_BAN_COLS: tuple[str, ...] = (
     "market_fair_win_prob",
     "reverse_line_movement",
     "steam_flag",
-    "fair_spread_vigfree",
+    "market_spread_raw",
     # Market-relative residuals / edges that reconstruct the line
     "elo_vs_market",
     "elo_edge_pts",
