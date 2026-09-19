@@ -1078,6 +1078,30 @@ def run_multi_year_backtest_walkforward(
             if phase2a_rows and phase2a_rows[-1].get("calib_method"):
                 chosen_method = phase2a_rows[-1]["calib_method"]
             results['CONFIDENCE_CALIB_METHOD'] = chosen_method
+
+            # P0.4 / Epic 11.4 (bench_frozen_elo_interval registry entry):
+            # `WalkForwardEloCalibrator.update_residuals` was never called
+            # anywhere in the live/backtest path, so `predict_interval`
+            # always fell back to its hardcoded default `half = 12.0` width
+            # forever, regardless of how well- or poorly-calibrated the
+            # model actually was in a given season. Wire it here, once per
+            # graded walk-forward season, using this season's own graded
+            # |prediction − actual| residuals — the natural "after graded
+            # games" loop for this calibrator (each `test_season` iteration
+            # is itself the walk-forward step). Only uses this season's
+            # already-realized outcomes (no future leakage into interval
+            # widths used for *this* season's own bets).
+            if (
+                elo_calibrator.fitted
+                and "ELO_MARGIN_CALIBRATED" in results.columns
+                and "ACTUAL_MARGIN" in results.columns
+            ):
+                _pred = pd.to_numeric(results["ELO_MARGIN_CALIBRATED"], errors="coerce")
+                _actual = pd.to_numeric(results["ACTUAL_MARGIN"], errors="coerce")
+                _mask = np.isfinite(_pred) & np.isfinite(_actual)
+                if int(_mask.sum()) >= 20:
+                    season_residuals = (_pred[_mask] - _actual[_mask]).abs().tolist()
+                    elo_calibrator.update_residuals(season_residuals)
             if bet_calibrator._fitted:
                 results['PHASE2A_LOGISTIC_C'] = float(bet_calibrator.logistic_c)
             compiled_results.append(results)

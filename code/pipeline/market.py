@@ -277,21 +277,63 @@ def devig_two_way(prob_a: float, prob_b: float) -> tuple[float, float]:
     return float(prob_a) / total, float(prob_b) / total
 
 
+# P0.3 (bench_ml_devig_no_op registry entry): when only the home American
+# price is known, the legacy fallback built an "away" price by negating the
+# home price (``implied_probability(-market_ml_home)``). By construction
+# ``implied_probability(x) + implied_probability(-x) == 1`` for every ``x``,
+# so ``devig_two_way`` on that pair is a mathematical no-op — the "fair"
+# output is bit-for-bit the *raw vigged* implied home/away split, not a
+# de-vigged one. That silently mislabeled a vigged number as vig-free.
+#
+# Fix: on single-sided feeds we (a) still compute the negation-based split
+# (best information available without a real two-sided quote) but (b) never
+# present it as genuinely de-vigged — it is shrunk toward the true coin-flip
+# (0.5/0.5) by a conservative *assumed* single-book vig fraction. This is a
+# documented, deliberately conservative approximation, not a real de-vig:
+# real NBA moneyline overround typically runs ~2-6% of implied probability
+# depending on the book; we assume the low end (below-average vig) so we
+# under- rather than over-correct when we have no real away price to check
+# against. Real two-sided quotes (``market_ml_away`` present) always take
+# the exact ``devig_two_way`` path with no assumed shrink.
+ASSUMED_SINGLE_SIDED_VIG_SHRINK = 0.03
+
+
+def is_single_sided_ml_quote(market_ml_away) -> bool:
+    """True when no real two-sided away price is available (negation fallback)."""
+    return market_ml_away is None or pd.isna(market_ml_away)
+
+
 def fair_probs_from_ml_pair(market_ml_home, market_ml_away=None) -> tuple[float, float]:
     """Fair home/away win probabilities from actual two-sided ML quotes.
 
-    When ``market_ml_away`` is missing, falls back to vig-symmetric negation
-    of the home price (legacy single-sided feeds only). Prefer real away
-    prices whenever the odds source provides them.
+    When ``market_ml_away`` is missing, this falls back to a same-price
+    negation of the home price to synthesize an away price (legacy
+    single-sided feeds only). That negation makes the two implied
+    probabilities sum to 1 *by construction*, so a plain ``devig_two_way``
+    call on them is a no-op — it does **not** remove any vig. To avoid
+    silently presenting a vigged number as "fair"/de-vigged, the
+    negation-derived pair is shrunk toward 0.5/0.5 by
+    ``ASSUMED_SINGLE_SIDED_VIG_SHRINK`` (see module comment above). This is a
+    conservative approximation, not a genuine de-vig — prefer real two-sided
+    ``market_ml_away`` prices whenever the odds source provides them, and use
+    :func:`is_single_sided_ml_quote` to detect when this fallback fired.
     """
     if pd.isna(market_ml_home):
         return 0.5, 0.5
     p_home = implied_probability(market_ml_home)
-    if market_ml_away is not None and pd.notna(market_ml_away):
+    if not is_single_sided_ml_quote(market_ml_away):
         p_away = implied_probability(market_ml_away)
-    else:
-        p_away = implied_probability(-market_ml_home)
-    return devig_two_way(p_home, p_away)
+        return devig_two_way(p_home, p_away)
+
+    # Single-sided fallback: negation sums to 1 automatically, so
+    # devig_two_way here is a no-op — apply the assumed-vig shrink so the
+    # result is never mistaken for a genuinely de-vigged probability.
+    p_away = implied_probability(-market_ml_home)
+    fh, fa = devig_two_way(p_home, p_away)
+    shrink = float(ASSUMED_SINGLE_SIDED_VIG_SHRINK)
+    fh = (1.0 - shrink) * fh + shrink * 0.5
+    fa = (1.0 - shrink) * fa + shrink * 0.5
+    return fh, fa
 
 
 def fair_probs_from_home_ml(market_ml_home, market_ml_away=None) -> tuple[float, float]:

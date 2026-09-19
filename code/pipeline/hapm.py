@@ -22,6 +22,11 @@ class HapmPriorTracker:
         self.fitted = False
         self._dyad_coef = {}
         self._trio_coef = {}
+        # P0.6 (bench_hapm_fake_shrink registry entry): per-key possession
+        # counts, accumulated during `fit`, so shrinkage reflects how much
+        # data actually supports each dyad/trio coefficient.
+        self._dyad_poss: dict[str, float] = {}
+        self._trio_poss: dict[str, float] = {}
 
     @staticmethod
     def _parse_lineup(s) -> list[str]:
@@ -31,6 +36,8 @@ class HapmPriorTracker:
         if stints_df is None or stints_df.empty:
             return False
         rows, y, w = [], [], []
+        dyad_poss: dict[str, float] = defaultdict(float)
+        trio_poss: dict[str, float] = defaultdict(float)
         for _, row in stints_df.iterrows():
             poss = float(row.get("possessions", 0) or 0)
             if poss < 1:
@@ -39,10 +46,14 @@ class HapmPriorTracker:
             feat = {}
             home = self._parse_lineup(row.get("HOME_players", ""))
             for a, b in itertools.combinations(home, 2):
-                feat[f"d:{min(a,b)}|{max(a,b)}"] = 1
+                key = f"{min(a,b)}|{max(a,b)}"
+                feat[f"d:{key}"] = 1
+                dyad_poss[key] += poss
             if len(home) >= 3:
                 for trio in itertools.combinations(sorted(home), 3):
-                    feat[f"t:{trio[0]}|{trio[1]}|{trio[2]}"] = 1
+                    key = f"{trio[0]}|{trio[1]}|{trio[2]}"
+                    feat[f"t:{key}"] = 1
+                    trio_poss[key] += poss
             if not feat:
                 continue
             rows.append(feat)
@@ -59,7 +70,24 @@ class HapmPriorTracker:
                 self._dyad_coef[name[2:]] = float(coef)
             elif name.startswith("t:"):
                 self._trio_coef[name[2:]] = float(coef)
+        # P0.6: store real per-key possession counts (empirical-Bayes shrink
+        # target), not just the coefficients themselves.
+        self._dyad_poss = dict(dyad_poss)
+        self._trio_poss = dict(trio_poss)
         return True
+
+    @staticmethod
+    def _shrink_factor(n_poss: float) -> float:
+        """Empirical-Bayes shrink weight ``n/(n+SHRINK)`` from real possession counts.
+
+        Replaces the old constant ``SHRINK/(SHRINK+50)`` (P0.6 /
+        bench_hapm_fake_shrink registry entry), which applied the *same*
+        shrink to every dyad/trio regardless of how many possessions
+        actually supported its coefficient — a duo observed for 10
+        possessions was trusted exactly as much as one observed for 5000.
+        """
+        n = max(0.0, float(n_poss))
+        return n / (n + SHRINK)
 
     def _lineup_prior(self, lineup) -> float:
         if not self.fitted:
@@ -69,12 +97,14 @@ class HapmPriorTracker:
         for a, b in itertools.combinations(ids, 2):
             k = f"{min(a,b)}|{max(a,b)}"
             if k in self._dyad_coef:
-                vals.append(self._dyad_coef[k] * (SHRINK / (SHRINK + 50)))
+                n_poss = self._dyad_poss.get(k, 0.0)
+                vals.append(self._dyad_coef[k] * self._shrink_factor(n_poss))
         if len(ids) >= 3:
             for trio in itertools.combinations(sorted(ids), 3):
                 k = f"{trio[0]}|{trio[1]}|{trio[2]}"
                 if k in self._trio_coef:
-                    vals.append(self._trio_coef[k] * (SHRINK / (SHRINK + 50)))
+                    n_poss = self._trio_poss.get(k, 0.0)
+                    vals.append(self._trio_coef[k] * self._shrink_factor(n_poss))
         return float(np.mean(vals) * 100.0) if vals else 0.0
 
     def feature_dict(self, home_lineup, away_lineup, game_id=None) -> dict:

@@ -21,6 +21,23 @@ class PlayerRatingTracker:
     Glicko‑2 inspired rating tracker with separate offensive/defensive ratings.
     Maintains μ (rating), RD (uncertainty), and simplified volatility tracking.
     Context-aware stint multipliers use PBP-derived box stats passed via stint_ctx.
+
+    P0.5 (bench_rd_games_played_proxy registry entry, docs-only per plan —
+    no Kalman rewrite here): despite the Glicko-2 naming, ``*_rd`` is
+    **not** a real Glicko-2 uncertainty estimate. It only ever decays
+    multiplicatively toward ``rd_floor`` as a function of *how many times*
+    ``_update_ratings`` has touched a player (see the ``0.99 + 0.02 *
+    min(abs_err, 0.15)`` update in ``_update_ratings`` below, and the
+    inactivity-based inflation in the offseason-reversion path), i.e. it is
+    a games-played/inactivity counter reused as if it carried genuine
+    posterior-variance information. A true Glicko-2/Kalman RD would grow
+    with rating volatility and shrink with informative observations, not
+    merely with elapsed update count. Any feature or calibration group
+    (e.g. ``elo_calibration.py``'s "uncertainty" group,
+    ``h_rating_uncertainty``/``a_rating_uncertainty``) that consumes this
+    value should treat it as a proxy for experience/recency, not as a
+    calibrated confidence interval. See Epic 9.1 (Kalman filter) for the
+    real fix; deliberately out of scope for this fix (see plan phase 0).
     """
 
     DEFAULTS = {
