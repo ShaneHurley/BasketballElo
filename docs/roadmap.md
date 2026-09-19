@@ -3,6 +3,175 @@
 Ranked by expected model lift and engineering value. Each epic has 3–10 tasks; each task has
 2–5+ subtasks with file touch-points and acceptance criteria. Research sources cited inline.
 
+---
+
+## P0 — Verified correctness bugs (fix before any new feature work)
+
+*Source: adversarial review, September 2026 (`docs/adversarial_review_2026.md`). Every item
+below was re-verified by direct code read before being added here. These change live model
+behavior **today** — they outrank every epic below. Rule: fix P0s top-down, add a regression
+test per fix, and record each in `code/LEAK_REGISTRY.md` (broaden registry scope to confirmed
+non-temporal defects — see Epic 6 addition).*
+
+### P0.1 — Chemistry & lineup-Elo train on home lineups only *(critical)*
+- **Evidence:** `code/pipeline/game_updates.py:120-123` is the only call site:
+  `chemistry_tracker.update_stint(hp, ap, xh, xa, ...)` and
+  `lineup_elo_tracker.update_stint(hp, ap, xh, xa, ..., True)` are each called **once per
+  stint, home lineup as offense**. `chemistry.py:36-58` `update_stint` only writes
+  `duo_off`/`trio_off`/`on_off["on"]` for `off_ids`; `on_off["off"]`/`["off_p"]` are declared
+  (`chemistry.py:23`) but **never written anywhere** — the on/off differential is
+  half-implemented. `lineup_elo.py:59-75` updates only `key_off`; `self.dff[key_off] +=
+  k * (-err * 0.5)` (`lineup_elo.py:72`) feeds the *offense's own* error into the "defensive"
+  field — the defending unit's `dff` is never updated by any code path.
+- **Contrast proof it's a bug, not a design:** the sibling `HierarchicalPossessionEngine._apply_update`
+  (`hierarchical.py:107-122`) updates **both** `cb_off` and `cb_def` combos symmetrically.
+- **Impact:** ~half of all stint data silently dropped for two of six rating engines; road-game
+  player chemistry never recorded; lineup5 defensive ratings are noise.
+- **Fix:** mirror the update call with `(ap, hp, xa, xb)` per stint (or make both trackers
+  internally symmetric like `hierarchical.py`); implement the `off` leg of `on_off`; add
+  regression test `test_lineup_trackers_update_both_sides`; registry entry
+  `asymmetric_lineup_training_bias`.
+
+### P0.2 — `spread_kelly_fraction` payout ratio inverted for juice ≠ −110 *(high)*
+- **Evidence:** `market.py:574`: `b = 100.0/110.0 if juice == -110 else abs(juice)/100.0`.
+  For −120 the correct payout is `100/120 = 0.833`; the code returns `1.2` (**44% stake
+  overstatement**). Production-reachable: `stake_profiles.py:82` ← `metrics.py:818-830` passes
+  real `SPREAD_PRICE`/`JUICE` whenever `abs(juice) >= 100`.
+- **Fix:** `b = 100.0/abs(juice) if juice < 0 else juice/100.0`; property test vs
+  `american_to_decimal` (`b == dec - 1`) across a juice grid.
+
+### P0.3 — Moneyline de-vig silently no-ops on single-sided feeds *(high)*
+- **Evidence:** `market.py:280-296` `fair_probs_from_ml_pair`: when `market_ml_away` is missing,
+  `p_away = implied_probability(-market_ml_home)` — American-odds negation sums to exactly 1.0,
+  so `devig_two_way` (`market.py:270-277`) normalizes by 1.0 and does nothing. Every downstream
+  ML EV/edge/calibration target computed from single-sided historical feeds (`load_modern_odds`)
+  uses the **raw vigged** probability labeled as "fair."
+- **Fix:** when only one side is known, apply an assumed-vig model (e.g. shrink toward 0.5 by a
+  league-average vig factor) or flag `ml_fair_probs_estimated=True` and exclude from ML
+  calibration targets; never present negation output as de-vigged.
+
+### P0.4 — Elo calibrator prediction interval is frozen at ±12 pts *(medium-high)*
+- **Evidence:** `elo_calibration.py:238-244` `predict_interval` reads `self._resid_q` default
+  12.0; `update_residuals` (`elo_calibration.py:243`) is **never called anywhere** in
+  `code/pipeline/` (grep-confirmed; only occurrence besides the definition is the legacy colab
+  notebook). Every interval-based gate downstream reads a hardcoded constant.
+- **Fix:** call `update_residuals` after each graded game in the live loop, or delete the API
+  and route callers to `SpreadCalibrator.predict_interval` (`market.py:1271-1278`), which
+  already implements a working rolling-quantile interval.
+
+### P0.5 — Player RD is a games-played counter, not Glicko-2 uncertainty *(medium-high)*
+- **Evidence:** `ratings.py:485-500`: `rd_new = rd * (0.99 + 0.02 * min(abs_err, 0.15))` —
+  multiplier ∈ [0.99, 0.993], so RD **always shrinks** regardless of outcome surprise, hitting
+  its floor in ~244 stints (< 1 season). Combined with `k_mult = max(0.5, 2.0*exp(-games/24.4))`
+  (`ratings.py:470`) the effective learning rate decays ~40× within a season — the exact
+  slow-reaction problem Epic 2.4 (Kalman) is meant to solve, caused here. RD feeds
+  `h_rating_uncertainty`, `elo_consistency`, `uncertainty_diff` in `SAFE_FEATURE_COLS`.
+- **Fix:** replace with scalar Kalman update (process noise `q`, observation noise
+  `r(poss)`, gain `K = rd²/(rd²+r)`) — see Epic 9.1. Until then, stop feeding RD-derived
+  features to the model as if they were uncertainty.
+
+### P0.6 — HAPM "shrinkage" is a constant, not empirical Bayes *(medium)*
+- **Evidence:** `hapm.py:71,76`: `coef * (SHRINK / (SHRINK + 50))` = `80/130 ≈ 0.615` applied to
+  every dyad/trio coefficient regardless of possession count — no `n` in the formula. A 5,000-
+  possession duo and a barely-seen duo get identical damping.
+- **Fix:** `coef * n/(n + SHRINK)` using actual per-key possession counts (mirror
+  `chemistry.py:33-34`'s real EB shrink), or subsume into Epic 8's unified RAPM.
+
+### P0.7 — Stale `HOME_PPP_BOOST = 0.024` landmine defaults (12× the tuned 0.002) *(medium)*
+- **Evidence:** `feature_utils.py:71` `elo_cfg.get("HOME_PPP_BOOST", 0.024)` and
+  `lineup_elo.py:15` constructor default `home_boost=0.024` vs `config.py:64`
+  `HOME_PPP_BOOST = 0.002`. Currently latent (live cfgs carry the key; `expected_margin` in
+  `lineup_elo.py` is only called from dead locals at `lineup_elo.py:66-67`), but any stripped
+  cfg/test-double/refactor silently reactivates a 12× home boost.
+- **Fix:** remove both defaults; import from `config.py` or require explicit kwargs. Also delete
+  the dead `exp_margin`/`act_margin` locals in `lineup_elo.py:66-67`.
+
+### P0.8 — `_weight_stint` garbage-time discount mis-fires and double-applies *(medium)*
+- **Evidence:** `ratings.py:506-515`: `if abs(margin) >= 25: weight *= gt_w` has **no period
+  guard** (a 25-pt lead in Q2 counts as "garbage"), and for a true 4th-quarter blowout with
+  `stint_ctx["garbage"]=True` the weight is multiplied by `gt_w` **twice** (0.3² = 0.09 instead
+  of the configured single 0.3 discount).
+- **Fix:** `elif`-chain the branches with period guards; unit test the four quarter×margin
+  combinations.
+
+### P0.9 — Venn-Abers filter fails open on invalid width *(medium)*
+- **Evidence:** `venn_abers.py:34-37`: `passes_venn_abers_filter` returns `True` when width is
+  `None`/NaN — a risk-limiting filter that approves bets it couldn't evaluate. Used in
+  `predict.py:809-811` and `simulate.py:894-901`.
+- **Fix:** return `False` on non-finite width (fail-closed, matching the codebase's date/odds
+  philosophy); add test.
+
+### P0.10 — `fair_spread_vigfree` is the raw vigged spread, mislabeled *(low-medium)*
+- **Evidence:** `market.py:562-565`: `fair_spread = market_spread  # placeholder when
+  single-book` — passed through unchanged, then fed to the model as a named "vig-free" feature
+  (`model.py` `MARKET_MICRO_COLS`). Misleads SHAP audits and feature importance reads.
+- **Fix:** rename to `market_spread_raw` until real multi-book de-vig exists (Epic 5.1), or
+  drop the column.
+
+### P0.11 — CLV is dead in the latest full run — investigate before trusting ROI *(high, diagnostic)*
+- **Evidence:** `output/20260914_224422_dash_standard/checkpoints/review.json`:
+  `n_actionable: 0`, `n_finite_clv: 0`, `mean_clv: NaN` across 5,247 backtest games (spread MAE
+  11.51 ± 0.64, ECE 0.065). Likely downstream of the still-`confirmed` `quote_tip_proxy` leak
+  (`LEAK_REGISTRY.md`) — decision≠close pairs never materialize.
+- **Fix:** trace `odds_provenance.json` / `quote_source` distribution for the run; if
+  tip-proxy-only, prioritize roadmap 5.4 (provenance debt) above all other Epic 5 work.
+
+---
+
+## Epic 7 — Wire up what already exists *(new — highest ROI-per-hour)*
+
+*Theme of the adversarial review: the hard statistical machinery is built and unit-tested in
+isolation but never called from the live pipeline. Integration, not invention.*
+
+- [ ] 7.1 Wire `devig.py` Shin/Power selection (`select_devig_method_from_folds`) into
+  `market.py`'s live path, bucketed by `market_snapshots.py`'s `minutes_before_tip`
+  (implements 5.7; pieces already exist independently)
+- [ ] 7.2 Wire `robust_fractional_kelly` / `optimize_slate_stakes` / `simulate_bankroll` into
+  `stake_profiles.compute_stake` + `apply_daily_caps`, replacing the ad hoc multiplicative
+  penalty stack (`interval_penalty` × `unc_penalty` double-count correlated uncertainty signals)
+- [ ] 7.3 Wire Venn-Abers `(p0, p1)` interval vs market implied probability on the **ML head**
+  (roadmap 5.5's actual ask — today it's a width-only ATS filter)
+- [ ] 7.4 Compose `minutes_forecast.py::forecast_team` output into `epm_priors.py`'s
+  `blend_lineup_off` (closes 2.2 — both halves exist, never connected; EPM blend weight is a
+  static 0.35 with no in-season decay, `epm_priors.py:27`)
+- [ ] 7.5 Surface `monitoring.py` drift reports + `negative_controls.py` permutation-null
+  results on the dashboard (both exist, neither visible anywhere)
+- [ ] 7.6 Add `min_samples` floors: `venn_abers.py` isotonic (currently none — contrast
+  `WalkForwardEloCalibrator min_samples=80`), and `calibration_registry.py` per-slice minimum-N
+  assertion (5-way disjoint split of a small tail currently has no size floor)
+
+## Epic 8 — Unify the n-man synergy estimators *(new)*
+
+*Three independent estimates of the same duo/trio synergy signal with three inconsistent
+shrinkage formulas (`chemistry.py` EB-shrink, `hapm.py` fixed 0.615 scalar, `hierarchical.py`
+tier-weighted additive) all feed the stacker simultaneously, plus a `lineup_composite.py`
+"disentangling" blend emitted **in addition to** its own raw ingredients — multicollinearity
+by construction.*
+
+- [ ] 8.1 **Blocked on P0.1** (fix the input possession stream first)
+- [ ] 8.2 Single sparse regularized possession-level regression (RAPM/PIPM-style): one design
+  matrix, one regularization path, consistent n-aware shrinkage for player/duo/trio
+  coefficients; replace `hapm.py` + `chemistry.py` duo/trio pieces
+- [ ] 8.3 Keep `lineup_elo.py` 5-man James-Stein as the top tier over the unified base
+- [ ] 8.4 Ablation gate: unified features vs the current triple-redundant set on OOF MAE/log-loss
+
+## Epic 9 — Rating update quality: real Kalman + evidence weighting *(new)*
+
+- [ ] 9.1 Replace `ratings.py::_update_ratings` compounded decay with a scalar Kalman filter
+  (fixes P0.5; supersedes roadmap 2.4 with the actual mechanism). Add rating-drift (DELTA-style)
+  feature as a byproduct of the innovation term
+- [ ] 9.2 Age-conditioned `offseason_revert` (needs a new `player_id → age` lookup — does not
+  exist in the codebase today)
+- [ ] 9.3 Fatigue-weighted evidentiary discount inside `_weight_stint` (a tired team's bad stint
+  is weaker evidence — same logic as the garbage-time discount; `fatigue.py`/`travel.py` state
+  already exists, never fed back into the rating update)
+- [ ] 9.4 Referee-crew multiplier in `_context_multiplier` (`refs.py::RefTracker` collects
+  crew pace/foul data today; nothing consumes it)
+- [ ] 9.5 Altitude × rest interaction in `PaceTracker.get_expected_pace` (`ALTITUDE_TEAMS`
+  exists in `config.py`; `is_altitude` is currently a bare additive flag)
+
+---
+
 **Primary optimization targets:** lower spread **MAE**, higher **winner** accuracy, better
 **totals** calibration, and positive **CLV**. §"Prediction-target map" below shows which tasks
 move which metric.
@@ -36,6 +205,10 @@ AST% / pace formulas).
 ---
 
 ## Epic 1 — Player & lineup rolling form features
+
+> **Prerequisite: P0.1.** Every lineup/chemistry rolling feature in this epic reads state from
+> `chemistry.py`/`lineup_elo.py`, which currently train on home lineups only. Fix the input
+> stream before building on top of it.
 
 *Gap confirmed: no player counting stats in features; lineup layer is rating residuals only.
 `nba_player_stats_2026.csv` sits on disk unused. Every new stat ships behind an ablation
@@ -104,6 +277,10 @@ same way: minutes-weighted player impact → team strength, with Bayesian stabil
 - [ ] 2.1.2 Backfill historical daily EPM (nightly values since 2001–02, no lookahead — backtest-safe)
 
 ### Task 2.2 — Minutes-weighted impact team rating
+*Re-scoped by adversarial review: both halves already exist in isolation
+(`minutes_forecast.py::forecast_team`, versioned `epm_priors.py::get_as_of`) but are never
+composed — `blend_lineup_off` (`epm_priors.py:114`) doesn't consume minutes forecasts at all.
+This is a one-file integration task (Epic 7.4), not research.*
 - [ ] 2.2.1 Team O/D rating = Σ(projected minutes × player EPM-O/D) via `minutes_forecast.py` + `rotation_scenarios.py`
 - [ ] 2.2.2 Features (`epm_team_net`, `epm_vs_elo_gap`) + season-start prior (CARM-Elo trick: player prior first, game results dominate as sample grows)
 - [ ] 2.2.3 Benchmark vs D&T minutes-weighted team EPM RMSE (~12.1)
@@ -114,6 +291,9 @@ same way: minutes-weighted player impact → team strength, with Bayesian stabil
 - [ ] 2.3.3 Historical injury archive so backtests use the same path as live ESPN fetch (`availability.py`, `injury_reports.py`)
 
 ### Task 2.4 — Kalman-filter now-casting (DARKO-style)
+*Re-scoped by adversarial review: this is a **replacement**, not an addition — the current
+`ratings.py::_update_ratings` decay (P0.5) actively stiffens learning ~40×/season, the opposite
+of a Kalman gain. Implement as Epic 9.1 and close this task when it lands.*
 - [ ] 2.4.1 Kalman filter per player-stat: recursive true-talent estimate updated per game, replacing raw season averages (DRIP/DARKO approach)
 - [ ] 2.4.2 Rookie priors from age/draft/measurables; regression-to-mean falls out of the filter
 - [ ] 2.4.3 DELTA-style rating-drift feature (rate of change — slow ratings underrate risers)
@@ -301,6 +481,12 @@ From `code/README.md` / leak registry:
 - Do not let `elo_blend_alpha` hug the market past `ELO_BLEND_ALPHA_MAX`
 - Do not ship rolling features without past-only T-60 isolation tests
 - Do not assume a new stat is a winner — ablate, SHAP-audit, then keep or drop
+- Do not tune `config.py` constants by inspecting full-history walk-forward results and then
+  treat them as priors (soft leak — `MIN_CONFIDENCE_SCORE`, `EDGE_AVOID_BAND`,
+  `MAX_QUANTILE_WIDTH`, `CONFIDENCE_TIER_2_STAKE_MULT` all carry this provenance in their
+  comments; future policy constants must be set on a designated config-tuning season only)
+- Do not add new features on top of P0-bug state (home-only lineup training, frozen intervals,
+  fake RD) — fix the base layer first
 - Do not rebuild what exists (Venn-Abers, Skellam, de-vig, shot quality, past-only CV) — extend it
 - Respect the ~65–72% winner-accuracy ceiling literature; chase calibration and CLV, not raw accuracy records
 
