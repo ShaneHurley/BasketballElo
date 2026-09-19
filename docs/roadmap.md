@@ -5,6 +5,45 @@ Ranked by expected model lift and engineering value. Each epic has 3–10 tasks;
 
 ---
 
+## Execution order
+
+*Source: `master_execution_order_+_completion_plan`. The epics below are listed in
+research-priority order, but the actual build order is dependency-driven, not
+research-priority-driven. Follow this 8-phase sequence instead of working top-to-bottom through
+the epics as numbered.*
+
+| Phase | Name | Contents |
+| ----- | ---- | -------- |
+| 0 | Stop the bleeding (remaining P0s) | P0.1, P0.3, P0.4, P0.5, P0.6, P0.11 |
+| 1 | Quick wins | 11.4 (wire `update_residuals`), 11.5 (HAPM real shrink) |
+| 2 | Test bench | Epic 10 (synthetic formula test bench) — must be green before any new feature work |
+| 3 | Wire what exists | Epic 7 (devig/Kelly/VA wiring, EPM+minutes, monitoring, min-sample floors) |
+| 4 | Rating engine | Epics 8, 9, 3 (RAPM unification, Kalman filter, aging curves, dual-window ratings, per-team HCA, season priors) |
+| 5 | Features | Epics 1, 2 (box derivation, rolling stats, EPM hardening, injury v2, lineup form, advanced stats) |
+| 6 | Market + ML | Epics 4, 5 (ensemble, Huber loss, CV hardening, line shopping, provenance, temporal devig, VA bounds, totals decomp, CVaR staking) |
+| 7 | Platform | Epic 6 (CI hardening, experiment tracking, serving, performance, knowledge sharing, automation) |
+
+Each phase gates the next: Phase 0 must be fixed or explicitly deferred before Phase 1; the
+Phase 2 bench suite must be fully green before any Phase 3+ feature work proceeds; Phase 4
+(rating engine) must land before Phase 5 (features) so new features aren't built on broken
+inputs. See `docs/adversarial_review_2026.md` and the master execution-order plan for full
+phase-by-phase task tables and "what to run" commands.
+
+### What "done" looks like for each phase
+
+| Phase | Done when |
+| ----- | --------- |
+| 0 | All P0s fixed or deferred with reason; bench P0 battery green |
+| 1 | 11.4, 11.5 landed; bench green |
+| 2 | Full bench suite green; CI bench job passes; `pytest -m bench` exits 0 |
+| 3 | All 7.x wired; bench tests prove end-to-end; no regressions |
+| 4 | OOF MAE flat or better; bench invariants green; SHAP audit clean |
+| 5 | Each feature behind ablation toggle; OOF + SHAP gate passed; bench invariant per feature |
+| 6 | CLV finite and positive; calibration slope in [0.85, 1.15]; provenance gate enforced |
+| 7 | CI green; Docker image builds; docs site deploys |
+
+---
+
 ## P0 — Verified correctness bugs (fix before any new feature work)
 
 *Source: adversarial review, September 2026 (`docs/adversarial_review_2026.md`). Every item
@@ -12,6 +51,9 @@ below was re-verified by direct code read before being added here. These change 
 behavior **today** — they outrank every epic below. Rule: fix P0s top-down, add a regression
 test per fix, and record each in `code/LEAK_REGISTRY.md` (broaden registry scope to confirmed
 non-temporal defects — see Epic 6 addition).*
+
+**Fixed: 5/11 (P0.2, P0.7, P0.8, P0.9, P0.10). Remaining open: 6/11 (P0.1, P0.3, P0.4, P0.5,
+P0.6, P0.11) — see [Execution order](#execution-order) Phase 0.**
 
 ### P0.1 — Chemistry & lineup-Elo train on home lineups only *(critical)*
 - **Evidence:** `code/pipeline/game_updates.py:120-123` is the only call site:
@@ -32,7 +74,7 @@ non-temporal defects — see Epic 6 addition).*
   regression test `test_lineup_trackers_update_both_sides`; registry entry
   `asymmetric_lineup_training_bias`.
 
-### P0.2 — `spread_kelly_fraction` payout ratio inverted for juice ≠ −110 *(high)*
+### P0.2 — `spread_kelly_fraction` payout ratio inverted for juice ≠ −110 *(high)* — **Fixed** (`test_bench_p0_kelly.py`, green)
 - **Evidence:** `market.py:574`: `b = 100.0/110.0 if juice == -110 else abs(juice)/100.0`.
   For −120 the correct payout is `100/120 = 0.833`; the code returns `1.2` (**44% stake
   overstatement**). Production-reachable: `stake_profiles.py:82` ← `metrics.py:818-830` passes
@@ -77,7 +119,7 @@ non-temporal defects — see Epic 6 addition).*
 - **Fix:** `coef * n/(n + SHRINK)` using actual per-key possession counts (mirror
   `chemistry.py:33-34`'s real EB shrink), or subsume into Epic 8's unified RAPM.
 
-### P0.7 — Stale `HOME_PPP_BOOST = 0.024` landmine defaults (12× the tuned 0.002) *(medium)*
+### P0.7 — Stale `HOME_PPP_BOOST = 0.024` landmine defaults (12× the tuned 0.002) *(medium)* — **Fixed** (`test_bench_p0_home_boost.py`, green)
 - **Evidence:** `feature_utils.py:71` `elo_cfg.get("HOME_PPP_BOOST", 0.024)` and
   `lineup_elo.py:15` constructor default `home_boost=0.024` vs `config.py:64`
   `HOME_PPP_BOOST = 0.002`. Currently latent (live cfgs carry the key; `expected_margin` in
@@ -86,7 +128,7 @@ non-temporal defects — see Epic 6 addition).*
 - **Fix:** remove both defaults; import from `config.py` or require explicit kwargs. Also delete
   the dead `exp_margin`/`act_margin` locals in `lineup_elo.py:66-67`.
 
-### P0.8 — `_weight_stint` garbage-time discount mis-fires and double-applies *(medium)*
+### P0.8 — `_weight_stint` garbage-time discount mis-fires and double-applies *(medium)* — **Fixed** (`test_bench_p0_garbage_weight.py`, green)
 - **Evidence:** `ratings.py:506-515`: `if abs(margin) >= 25: weight *= gt_w` has **no period
   guard** (a 25-pt lead in Q2 counts as "garbage"), and for a true 4th-quarter blowout with
   `stint_ctx["garbage"]=True` the weight is multiplied by `gt_w` **twice** (0.3² = 0.09 instead
@@ -94,14 +136,14 @@ non-temporal defects — see Epic 6 addition).*
 - **Fix:** `elif`-chain the branches with period guards; unit test the four quarter×margin
   combinations.
 
-### P0.9 — Venn-Abers filter fails open on invalid width *(medium)*
+### P0.9 — Venn-Abers filter fails open on invalid width *(medium)* — **Fixed** (`test_bench_p0_venn_abers.py`, green)
 - **Evidence:** `venn_abers.py:34-37`: `passes_venn_abers_filter` returns `True` when width is
   `None`/NaN — a risk-limiting filter that approves bets it couldn't evaluate. Used in
   `predict.py:809-811` and `simulate.py:894-901`.
 - **Fix:** return `False` on non-finite width (fail-closed, matching the codebase's date/odds
   philosophy); add test.
 
-### P0.10 — `fair_spread_vigfree` is the raw vigged spread, mislabeled *(low-medium)*
+### P0.10 — `fair_spread_vigfree` is the raw vigged spread, mislabeled *(low-medium)* — **Fixed** (`test_bench_p0_vigfree_honesty.py`, green)
 - **Evidence:** `market.py:562-565`: `fair_spread = market_spread  # placeholder when
   single-book` — passed through unchanged, then fed to the model as a named "vig-free" feature
   (`model.py` `MARKET_MICRO_COLS`). Misleads SHAP audits and feature importance reads.
