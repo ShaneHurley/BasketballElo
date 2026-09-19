@@ -572,7 +572,9 @@ def spread_kelly_fraction(cover_prob: float, juice: float = -110) -> float:
     """Full Kelly fraction for ATS at given juice (e.g. -110)."""
     if cover_prob is None or not np.isfinite(cover_prob):
         return 0.0
-    b = 100.0 / 110.0 if juice == -110 else abs(juice) / 100.0
+    # American payout ratio: favorites risk more than they win (100/|juice|);
+    # underdogs win more than they risk (juice/100). Must match american_to_decimal - 1.
+    b = 100.0 / abs(juice) if juice < 0 else juice / 100.0
     kelly = (cover_prob * b - (1.0 - cover_prob)) / b
     return float(max(0.0, kelly))
 

@@ -33,6 +33,7 @@ def _isotonic_prob(scores, labels, query_score):
 
 
 def passes_venn_abers_filter(width: float, max_width: float) -> bool:
+    # Fail closed: a risk-limiting filter that cannot evaluate width must reject.
     if width is None or not np.isfinite(width):
-        return True
+        return False
     return float(width) <= float(max_width)
