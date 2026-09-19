@@ -3,7 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>T-60 Analysis Dashboard</title>
+  <title>T-60 Analysis Dashboard · BasketballElo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="/static/css/app.css" />
   <script src="/static/js/vendor/plotly.min.js" defer></script>
   <script src="/static/js/jsonview.js" defer></script>
@@ -11,9 +17,21 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand">T-60 Analysis</div>
-    <p class="tagline">Local research lab · black/grey night mode · localhost only</p>
-    <nav class="tabs" role="tablist">
+    <div class="top-bar">
+      <div class="brand-block">
+        <div class="brand">T-60 Analysis Dashboard</div>
+        <p class="tagline">BasketballElo · leak-aware NBA spread prediction · local research lab</p>
+      </div>
+      <div class="top-links">
+        <a class="top-link" href="https://shanehurley.github.io/BasketballElo/" target="_blank" rel="noopener">
+          Docs site ↗
+        </a>
+        <a class="top-link" href="https://github.com/ShaneHurley/BasketballElo" target="_blank" rel="noopener">
+          GitHub ↗
+        </a>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Dashboard sections">
       {% for id, label in tabs %}
       <button type="button" class="tab{% if id == 'all' %} active{% endif %}" data-tab="{{ id }}" role="tab">{{ label }}</button>
       {% endfor %}
@@ -37,7 +55,7 @@
       <div id="summary-cards" class="cards"></div>
       <div id="ats-status-json"></div>
       <div class="split">
-        <div>
+        <div class="card-panel">
           <h2>Results</h2>
           <input id="results-search" type="search" placeholder="Filter rows…" />
           <div class="table-wrap"><table id="results-table"></table></div>
@@ -47,7 +65,7 @@
             <button type="button" id="page-next">Next</button>
           </div>
         </div>
-        <div>
+        <div class="card-panel">
           <h2>Artifacts</h2>
           <ul id="artifact-list" class="file-list"></ul>
           <h2>Charts</h2>
@@ -55,8 +73,21 @@
         </div>
       </div>
       <div id="empty-runs" class="empty hidden">
-        <p>No runs found under <code>output/</code>.</p>
-        <button type="button" class="primary" id="btn-empty-smoke">Run suite smoke</button>
+        <p class="empty-eyebrow">Welcome to the T-60 Analysis Dashboard</p>
+        <h2 class="empty-title">No runs yet — let's fix that.</h2>
+        <p class="empty-body">
+          This dashboard is the control room for the BasketballElo pipeline: a leak-aware,
+          walk-forward NBA spread prediction system. Launch a fast <strong>suite smoke</strong> to
+          generate your first run, then explore results, calibration charts, and player ratings here.
+        </p>
+        <div class="empty-actions">
+          <button type="button" class="primary" id="btn-empty-smoke">Run suite smoke</button>
+          <button type="button" id="btn-empty-docs">Read the documentation</button>
+        </div>
+        <p class="empty-foot muted">
+          New here? The <strong>Documentation</strong> tab explains the pipeline stages and how to
+          read every scorecard.
+        </p>
       </div>
     </section>
 
@@ -259,6 +290,93 @@
         <button type="button" id="btn-clear-finished">Clear finished</button>
       </div>
       <div id="jobs-full" class="jobs-list"></div>
+    </section>
+
+    <section id="panel-docs" class="panel" data-panel="docs">
+      <div class="docs-layout">
+        <article class="docs-article">
+          <p class="docs-eyebrow">Documentation</p>
+          <h1 class="docs-title">Welcome to the T-60 Analysis Dashboard</h1>
+          <p class="docs-lede">
+            This is the local control room for <strong>BasketballElo</strong> — a leak-aware,
+            walk-forward NBA spread prediction pipeline. It lets you launch training and backtest
+            jobs, watch them live, and inspect every scorecard the pipeline produces, all from
+            <code>http://127.0.0.1:8765</code>. Nothing leaves your machine.
+          </p>
+
+          <h2>What this dashboard does</h2>
+          <div class="docs-grid">
+            <div class="docs-tile">
+              <h3>All Data</h3>
+              <p>Browse walk-forward runs: summary metrics, per-game results, artifacts, and charts.</p>
+            </div>
+            <div class="docs-tile">
+              <h3>Run Lab</h3>
+              <p>Configure and launch the full suite or a quick backtest, with presets from smoke to full.</p>
+            </div>
+            <div class="docs-tile">
+              <h3>Player</h3>
+              <p>Inspect the live player-rating snapshot (Glicko-2 style offense/defense) and export it.</p>
+            </div>
+            <div class="docs-tile">
+              <h3>ATS · ML · Totals</h3>
+              <p>Calibration scorecards for against-the-spread, moneyline, and over/under markets.</p>
+            </div>
+            <div class="docs-tile">
+              <h3>Jobs</h3>
+              <p>A real async job runner with progress, ETA, live logs over SSE, and cancellation.</p>
+            </div>
+            <div class="docs-tile">
+              <h3>Honesty banners</h3>
+              <p>Research-only warnings appear whenever a data source would overclaim (e.g. tip-proxy quotes).</p>
+            </div>
+          </div>
+
+          <h2>Pipeline stages</h2>
+          <p>
+            The full suite runs staged phases (0–8) with an anti-overfit review stop. In brief:
+          </p>
+          <ol class="docs-stages">
+            <li><strong>Ingest &amp; canonical scores</strong> — normalize play-by-play; dual-verify final scores.</li>
+            <li><strong>Stints</strong> — rebuild lineup-vs-lineup possessions from substitutions.</li>
+            <li><strong>Dates &amp; odds</strong> — fail-closed chronology; decision-time vs closing market quotes.</li>
+            <li><strong>Features at T-60</strong> — everything the model may know 60 minutes before tip, nothing after.</li>
+            <li><strong>Ratings</strong> — player Glicko-2, hierarchical n-man, HAPM ridge, chemistry, lineup &amp; team Elo.</li>
+            <li><strong>MetaScore stack</strong> — past-only out-of-fold stacking into a margin model.</li>
+            <li><strong>Calibration</strong> — three-stage calibration into cover probabilities.</li>
+            <li><strong>Gates &amp; staking</strong> — bet-selection gates and fractional Kelly sizing.</li>
+            <li><strong>Walk-forward backtest</strong> — every season predicted using only earlier data.</li>
+          </ol>
+
+          <h2>How to interpret the outputs</h2>
+          <table class="docs-table">
+            <thead>
+              <tr><th>Metric</th><th>What it tells you</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Spread / Total MAE</td><td>Average absolute error vs actual margins and totals. Lower is better; compare against the market baseline, not zero.</td></tr>
+              <tr><td>ATS hit rate</td><td>Share of graded against-the-spread picks that covered. Only meaningful on the <em>actionable</em> population after gates.</td></tr>
+              <tr><td>ROI</td><td>Simulated return on actionable bets at standard -110 pricing. Small samples swing wildly — check N first.</td></tr>
+              <tr><td>Interval coverage</td><td>How often actuals land inside the model's prediction interval. Should sit near the nominal level.</td></tr>
+              <tr><td>Brier / Logloss</td><td>Win-probability sharpness and calibration on the ML tab. Lower is better.</td></tr>
+              <tr><td>CLV</td><td>Closing line value. Positive CLV is the strongest evidence a signal is real — but only when the claim gate allows it.</td></tr>
+            </tbody>
+          </table>
+
+          <h2>Go deeper</h2>
+          <ul class="docs-links">
+            <li><a href="https://shanehurley.github.io/BasketballElo/" target="_blank" rel="noopener">Full documentation site ↗</a> — architecture, math, pipeline reference.</li>
+            <li><a href="https://github.com/ShaneHurley/BasketballElo/blob/main/code/LEAK_REGISTRY.md" target="_blank" rel="noopener">LEAK_REGISTRY.md ↗</a> — every chronological leak found, documented, and regression-tested.</li>
+            <li><a href="https://github.com/ShaneHurley/BasketballElo/blob/main/docs/roadmap.md" target="_blank" rel="noopener">Roadmap ↗</a> — where the project is heading next.</li>
+            <li><a href="https://github.com/ShaneHurley/BasketballElo" target="_blank" rel="noopener">GitHub repository ↗</a> — source, tests, and history.</li>
+          </ul>
+
+          <p class="docs-foot muted">
+            Tip: run a <strong>suite smoke</strong> from the All Data tab to see the whole loop end-to-end
+            in a few minutes, then open the Run Lab viewer to watch the pipeline narrate itself.
+          </p>
+        </article>
+      </div>
     </section>
   </main>
 

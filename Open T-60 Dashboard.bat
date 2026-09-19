@@ -1,8 +1,9 @@
 @echo off
 REM Double-click to start the T-60 Analysis Dashboard (Windows).
 REM Leave this window open while using the site; Ctrl+C to stop.
+REM Escape hatches: "Open T-60 Dashboard.bat" --no-browser   or   set T60_NO_BROWSER=1
 
-setlocal
+setlocal enabledelayedexpansion
 set "ROOT=%~dp0"
 set "CODE=%ROOT%code"
 set "URL=http://127.0.0.1:8765"
@@ -29,8 +30,25 @@ if not defined PY (
   exit /b 1
 )
 
-REM Open browser after a short delay (new window so server keeps this console).
-start "" cmd /c "timeout /t 2 /nobreak >nul & start %URL%"
+set "NO_BROWSER=0"
+if /i "%~1"=="--no-browser" set "NO_BROWSER=1"
+if /i "%T60_NO_BROWSER%"=="1" set "NO_BROWSER=1"
+
+REM Ask permission before popping up a browser window.
+if "%NO_BROWSER%"=="0" (
+  set "ANSWER="
+  set /p "ANSWER=Open the T-60 Dashboard in your browser? [Y/n] "
+  if /i "!ANSWER!"=="n" set "NO_BROWSER=1"
+  if /i "!ANSWER!"=="no" set "NO_BROWSER=1"
+)
+
+if "%NO_BROWSER%"=="0" (
+  REM Open browser after a short delay (new window so server keeps this console).
+  start "" cmd /c "timeout /t 2 /nobreak >nul & start %URL%"
+  echo Browser will open at %URL% shortly...
+) else (
+  echo Browser launch skipped - open %URL% manually when ready.
+)
 
 echo T-60 Analysis Dashboard
 echo   %URL%

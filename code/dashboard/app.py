@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
                     ("ml", "ML"),
                     ("totals", "Totals"),
                     ("jobs", "Jobs"),
+                    ("docs", "Documentation"),
                 ],
             },
         )

@@ -1,4 +1,4 @@
-/* T-60 dashboard UI: tabs, Run Lab, jobs SSE/logs, charts, night Plotly */
+/* T-60 dashboard UI: tabs, Run Lab, jobs SSE/logs, charts, Carbon light Plotly */
 (function () {
   "use strict";
 
@@ -21,12 +21,12 @@
     "suite_smoke", "suite_custom", "backtest_quick", "player_rating_smoke",
   ]);
 
-  const DARK_LAYOUT = {
+  const LIGHT_LAYOUT = {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#c8c8ce", family: "IBM Plex Sans, sans-serif" },
-    xaxis: { gridcolor: "#26262c", zerolinecolor: "#26262c", color: "#8b8b93" },
-    yaxis: { gridcolor: "#26262c", zerolinecolor: "#26262c", color: "#8b8b93" },
+    font: { color: "#161616", family: "IBM Plex Sans, sans-serif" },
+    xaxis: { gridcolor: "#e0e0e0", zerolinecolor: "#c6c6c6", color: "#6f6f6f" },
+    yaxis: { gridcolor: "#e0e0e0", zerolinecolor: "#c6c6c6", color: "#6f6f6f" },
     margin: { t: 40, r: 20, b: 40, l: 50 },
   };
 
@@ -82,10 +82,10 @@
     );
   }
 
-  function mergeDark(layout) {
-    const L = { ...DARK_LAYOUT, ...(layout || {}) };
-    L.xaxis = { ...DARK_LAYOUT.xaxis, ...(layout && layout.xaxis) };
-    L.yaxis = { ...DARK_LAYOUT.yaxis, ...(layout && layout.yaxis) };
+  function mergeLayout(layout) {
+    const L = { ...LIGHT_LAYOUT, ...(layout || {}) };
+    L.xaxis = { ...LIGHT_LAYOUT.xaxis, ...(layout && layout.xaxis) };
+    L.yaxis = { ...LIGHT_LAYOUT.yaxis, ...(layout && layout.yaxis) };
     return L;
   }
 
@@ -310,7 +310,7 @@
         const fig = await api(`/api/charts/${encodeURIComponent(c.id)}${q}`);
         if (window.Plotly) {
           const data = fig.data || [];
-          const layout = mergeDark(fig.layout || { title: c.title });
+          const layout = mergeLayout(fig.layout || { title: c.title });
           if (!data.length) {
             div.innerHTML = `<div class="muted" style="padding:1rem">${esc(c.title)}: ${(fig.layout && fig.layout.annotations && fig.layout.annotations[0] && fig.layout.annotations[0].text) || "no data"}</div>`;
           } else {
@@ -522,7 +522,7 @@
   }
 
   function sparkLayout() {
-    return mergeDark({
+    return mergeLayout({
       margin: { t: 8, r: 8, b: 24, l: 36 },
       height: 110,
       showlegend: false,
@@ -545,8 +545,8 @@
         y,
         type: "scatter",
         mode: "lines+markers",
-        line: { color: "#c8c8ce", width: 1.5 },
-        marker: { size: 4, color: "#9a9aa3" },
+        line: { color: "#0f62fe", width: 1.5 },
+        marker: { size: 4, color: "#0043ce" },
         hovertemplate: "trial %{pointNumber}: %{y:.3f}<extra></extra>",
       }],
       sparkLayout(),
@@ -781,6 +781,8 @@
     const smoke = () => startJob("suite_smoke", "run", { skip_integrity: true, preset: "smoke" });
     $("#btn-suite-smoke").addEventListener("click", smoke);
     $("#btn-empty-smoke").addEventListener("click", smoke);
+    const emptyDocs = $("#btn-empty-docs");
+    if (emptyDocs) emptyDocs.addEventListener("click", () => switchTab("docs"));
     $("#btn-promo-gates").addEventListener("click", () =>
       startJob("promotion_gates", "all", { run_id: state.runId })
     );
