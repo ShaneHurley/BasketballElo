@@ -170,6 +170,81 @@ by construction.*
 - [ ] 9.5 Altitude × rest interaction in `PaceTracker.get_expected_pace` (`ALTITUDE_TEAMS`
   exists in `config.py`; `is_altitude` is currently a bare additive flag)
 
+## Epic 11 — Quick Wins *(new — lands before Epic 10 tasks)*
+
+*These are the remaining small, verified P0 fixes that don't change model behavior broadly (no
+cache invalidation, no re-run needed). Each is a single-file change plus one bench test. Sized
+for a single small agent per task; see "Fleet orchestration design" under Epic 10 for how these
+are dispatched.*
+
+### Task 11.1 — P0.7: Remove stale `HOME_PPP_BOOST = 0.024` landmine defaults
+- **Files:** `code/pipeline/feature_utils.py:71`, `code/pipeline/lineup_elo.py:15`
+- **Change:** Replace `elo_cfg.get("HOME_PPP_BOOST", 0.024)` with `elo_cfg["HOME_PPP_BOOST"]`
+  (KeyError on missing = fail loud). In `lineup_elo.py`, change constructor default
+  `home_boost: float = 0.024` to `home_boost: float = 0.002` and add a comment citing
+  `config.py:64`.
+- **Bench test:** `test_bench_p0_home_boost.py` — construct `LineupEloTracker()` with no args,
+  assert `tracker.home_boost == 0.002`; construct `engine_implied_margins` with a tracker whose
+  `cfg` lacks the key, assert `KeyError` raised.
+- **Acceptance:** bench green; `grep -rn "0.024" code/pipeline/` returns zero hits.
+- **Agent prompt size:** ~200 tokens of context (two file paths, two line numbers, the fix).
+
+### Task 11.2 — P0.8: Fix `_weight_stint` garbage-time double-apply and missing period guard
+- **File:** `code/pipeline/ratings.py:506-515`
+- **Change:** Restructure to a single `elif` chain:
+  ```python
+  if stint_ctx and stint_ctx.get("garbage"):
+      weight *= gt_w
+  elif period >= 4 and abs(margin) >= 15:
+      weight *= gt_w
+  # Remove the unguarded `if abs(margin) >= 25: weight *= gt_w` entirely,
+  # or gate it: `elif period >= 4 and abs(margin) >= 25: weight *= gt_w`
+  ```
+- **Bench test:** `test_bench_p0_garbage_weight.py` — four cases: (Q1, margin=30) → no discount;
+  (Q4, margin=20, garbage=True) → exactly one `gt_w` application; (Q4, margin=30, garbage=True)
+  → exactly one application (not two); (Q4, margin=10) → no discount.
+- **Acceptance:** bench green; the four quarter×margin combinations each produce the expected
+  weight multiplier.
+- **Agent prompt size:** ~150 tokens.
+
+### Task 11.3 — P0.10: Rename `fair_spread_vigfree` to honest label
+- **File:** `code/pipeline/market.py:562-565`
+- **Change:** Rename the dict key to `market_spread_raw` and update the comment. Check
+  `model.py` `MARKET_MICRO_COLS` for the old name and update it there too.
+- **Bench test:** `test_bench_p0_vigfree_honesty.py` — call
+  `market_microstructure_features(spread_move=0, public_home_pct=0.5, market_spread=-3.5)`,
+  assert `"market_spread_raw" in result` and `"fair_spread_vigfree" not in result`.
+- **Acceptance:** bench green; `grep -rn "fair_spread_vigfree" code/` returns zero hits.
+- **Agent prompt size:** ~150 tokens.
+
+### Task 11.4 — P0.4: Wire `update_residuals` into live loop or delete dead API
+- **Files:** `code/pipeline/elo_calibration.py:238-244`, `code/pipeline/backtest.py` (find where
+  graded games are processed)
+- **Change:** In `backtest.py`'s walk-forward loop, after each graded game, call
+  `elo_calibrator.update_residuals(residuals_list)`. If no natural call site exists, delete
+  `predict_interval`/`update_residuals` from `WalkForwardEloCalibrator` and document that
+  `SpreadCalibrator.predict_interval` (`market.py:1271-1278`) is the working interval source.
+- **Bench test:** `test_bench_p0_interval_updates.py` — create calibrator, call
+  `predict_interval` (expect ±12), call `update_residuals([5]*30)`, call `predict_interval`
+  again (expect width ≠ 24).
+- **Acceptance:** bench green; `grep -rn "update_residuals" code/pipeline/` returns at least one
+  call site outside the definition.
+- **Agent prompt size:** ~250 tokens (needs to find the backtest loop).
+
+### Task 11.5 — P0.6: HAPM shrinkage uses real possession counts
+- **File:** `code/pipeline/hapm.py:71,76`
+- **Change:** Replace `coef * (SHRINK / (SHRINK + 50))` with `coef * (n / (n + SHRINK))` where
+  `n` is the actual possession count for that dyad/trio key. Requires tracking per-key
+  possession counts in the tracker (add `self._dyad_poss` / `self._trio_poss` dicts,
+  incremented during fit).
+- **Bench test:** `test_bench_p0_hapm_shrink.py` — fit HAPM on synthetic stints where duo A has
+  5000 possessions and duo B has 10; assert duo A's shrunk coefficient is closer to its raw
+  value than duo B's.
+- **Acceptance:** bench green; shrinkage factor differs by possession count.
+- **Agent prompt size:** ~300 tokens.
+
+---
+
 ## Epic 10 — Synthetic formula test bench & adversarial stress harness *(new)*
 
 *Real NBA data clusters in a narrow band (margins ±30, possessions ~90–110, juice near −110).
@@ -184,84 +259,299 @@ different purpose. Reuse only its constraint ideas. Copy the docstring/registry-
 from `tests/test_cv_past_only.py`. Extend `pipeline/negative_controls.py` for per-stage
 permutation nulls (10.4.4).
 
-### Task 10.1 — Synthetic data factory layer
-- [ ] 10.1.1 New `code/tests/synth/factories.py`: `make_stint(...)`, `make_game(...)`,
-  `make_odds(ml_h, ml_a, spread, total, juice)`, `make_player_season(...)` — schema-identical
-  to `stints.py` / odds loaders; deterministic via explicit `seed=` everywhere
-- [ ] 10.1.2 Extreme preset library in `code/tests/synth/presets.py`: `BLOWOUT_60`,
-  `ZERO_POSSESSION_FT_STINT`, `ONE_SIDED_ODDS_FEED`, `JUICE_EXTREMES`
-  (−10000/+10000/−100/+5000), `ROOKIE_VS_5000_GAME_VET`, `NAN_STORM`,
-  `SINGLE_LINEUP_ALL_SEASON`, `DISJOINT_LINEUPS_EVERY_STINT`
-- [ ] 10.1.3 Schema-parity test: factory output passes the same validation real ingest applies
-  (`test_ingest_formats.py`-style) so bench failures mean formula bugs, not fake-data artifacts
-- [ ] 10.1.4 Document in `code/tests/synth/README.md`: bench is for *invariant/adversarial*
-  testing, never for tuning constants (bench-derived constants = new soft-leak class)
+*Each task below is sized for a single agent session. The "Context" field is the exact text to
+paste into the agent prompt. The "Adversarial check" field is what the reviewer agent must
+attempt. See "Fleet orchestration design" below for how these are dispatched.*
+
+### Task 10.1 — Synthetic data factory layer (partially done)
+- [ ] 10.1.1 — Extend factories with game-sequence and season builders *(scaffold has
+  make_stint/make_game/make_odds; needs make_game_sequence and make_season)*
+  - **File:** `code/tests/synth/factories.py` (extend)
+  - **Add:** `make_game_sequence(n_games, teams, start_date, seed)` → list of game dicts with
+    realistic date spacing (1-3 days apart); `make_season(teams, n_games_per_team, seed)` →
+    full season DataFrame.
+  - **Context:** "Extend `code/tests/synth/factories.py` with `make_game_sequence(n_games,
+    teams, start_date, seed)` returning a list of game dicts spaced 1-3 days apart
+    chronologically, and `make_season(teams, n_games_per_team, seed)` returning a DataFrame of
+    games for a full season. Use `np.random.default_rng(seed)` for all randomness. Follow the
+    existing factory style."
+  - **Adversarial check:** Verify two calls with the same seed produce identical output; verify
+    dates are strictly increasing; verify no team plays itself.
+  - **Acceptance:** `test_bench_factories.py` extended with determinism + chronology +
+    no-self-game tests, all green.
+- [x] 10.1.2 — Preset library *(done — 8 presets exist)*
+- [ ] 10.1.3 — Schema-parity test
+  - **File:** `code/tests/test_bench_schema_parity.py` (new)
+  - **Change:** Run `make_stint()` output through the same column checks `stints.py` applies
+    (required columns present, dtypes match). Run `make_odds()` output through `market.py`'s
+    odds-loading validation.
+  - **Context:** "Create `code/tests/test_bench_schema_parity.py`. Assert that `make_stint()`
+    output has all columns that `pipeline/stints.py` produces (check `stints.py` for the output
+    schema). Assert that `make_odds()` output has all keys consumed by `pipeline/market.py`'s
+    feature builders. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Remove a column from the factory and verify the parity test fails.
+  - **Acceptance:** parity test green; removing any required column from a factory causes a
+    red test.
+- [x] 10.1.4 — README *(done)*
 
 ### Task 10.2 — Stage-by-stage formula invariant battery
-- [ ] 10.2.1 `test_bench_ratings.py` — `ratings.py`: home/away symmetry (swap teams → ratings
-  mirror), RD bounded in `[rd_floor, 350]`, K-decay monotonicity, garbage-weight idempotence
-  (applying twice ≠ applying once — catches P0.8)
-- [ ] 10.2.2 `test_bench_lineup_chemistry.py` — `lineup_elo.py`/`chemistry.py`: mirrored-update
-  invariant (fails today = P0.1), on/off `off` leg written, shrinkage → 0 as n → 0 and → raw
-  as n → ∞
-- [ ] 10.2.3 `test_bench_market.py` — `market.py`/`devig.py`: devig sums to 1 including
-  single-sided (P0.3), `spread_kelly_fraction` payout `b == american_to_decimal(juice) − 1`
-  (P0.2), `fair_spread_vigfree` honesty (P0.10), Gaussian/Skellam agree at σ extremes
-- [ ] 10.2.4 `test_bench_calibration.py` — `elo_calibration.py`/`venn_abers.py`/
-  `calibration_registry.py`: interval responds to `update_residuals` (P0.4), VA fail-closed
-  on NaN (P0.9), isotonic min-sample floors, disjoint-slice minimum-N
-- [ ] 10.2.5 `test_bench_staking_grading.py` — stake ≥ 0, stake → 0 as edge → 0, push ⇒ 0
-  profit, caps before profit, bankroll never negative under 100-loss streak
+- [ ] 10.2.1 — `test_bench_ratings.py`
+  - **File:** `code/tests/test_bench_ratings.py` (new)
+  - **Invariants to test:**
+    1. **Home/away symmetry:** Create two identical stints with teams swapped. Feed stint A to
+       tracker 1, stint B to tracker 2. Assert tracker 1's home ratings == tracker 2's away
+       ratings (within float tolerance).
+    2. **RD bounded:** After 500 stints, assert all player RDs are in `[rd_floor, 350]`.
+    3. **K-decay monotonicity:** For a single player, record effective K after each of 50
+       games. Assert K is non-increasing.
+    4. **Garbage-weight idempotence:** Apply `_weight_stint` to a garbage stint. Record weight.
+       Apply the same call again with the same inputs. Assert the second call returns the same
+       weight (not double-discounted).
+  - **Context:** "Create `code/tests/test_bench_ratings.py`. Use
+    `tests.synth.factories.make_stint` and `tests.synth.presets` for inputs. Test four
+    invariants of `pipeline/ratings.py::PlayerRatingTracker`: (1) home/away symmetry — swap
+    teams, ratings must mirror; (2) RD bounded in [rd_floor, 350] after 500 stints; (3) K-decay
+    monotonically non-increasing over 50 games; (4) `_weight_stint` is idempotent for identical
+    garbage-time inputs. Use `@pytest.mark.bench`. Cite P0.8 in the garbage-weight test
+    docstring."
+  - **Adversarial check:** Construct a stint where `period=4, margin=16, garbage=False` — does
+    the `elif` branch fire correctly? Construct a stint where `period=2, margin=30` — does the
+    unguarded `abs(margin) >= 25` branch fire (it should NOT after P0.8 fix)?
+  - **Acceptance:** all four invariants green; adversarial cases covered.
+- [ ] 10.2.2 — `test_bench_lineup_chemistry.py`
+  - **File:** `code/tests/test_bench_lineup_chemistry.py` (new)
+  - **Invariants to test:**
+    1. **Mirrored update (P0.1 regression):** Feed N stints to a tracker. Assert the away
+       lineup's `duo_off`/`trio_off` state is non-empty (it will be empty today — this test is
+       `xfail(strict=True)` until P0.1 is fixed).
+    2. **On/off `off` leg written:** After stints where a player is on-court and off-court,
+       assert `on_off[pid]["off_p"] > 0` (also `xfail` until P0.1 fix).
+    3. **Shrinkage limits:** A duo with 0 possessions → shrunk value == 0. A duo with 100,000
+       possessions → shrunk value ≈ raw value (within 1%).
+  - **Context:** "Create `code/tests/test_bench_lineup_chemistry.py`. Test three invariants of
+    `pipeline/chemistry.py::ChemistryTracker` and `pipeline/lineup_elo.py::LineupEloTracker`:
+    (1) mirrored update — after N stints, away lineup state is populated (mark
+    `xfail(strict=True)` citing P0.1); (2) on/off `off` leg is written (mark
+    `xfail(strict=True)` citing P0.1); (3) shrinkage approaches 0 at n=0 and raw at n=100000.
+    Use `tests.synth.factories` for inputs. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Verify the shrinkage test uses `MIN_DUO_POSS` correctly — a duo with
+    49 possessions (< 50) should return 0 from `_duo_net` regardless of raw value.
+  - **Acceptance:** shrinkage test green; mirrored-update and on/off tests are `xfail` (red)
+    until P0.1 lands.
+- [ ] 10.2.3 — `test_bench_market.py`
+  - **File:** `code/tests/test_bench_market.py` (new)
+  - **Invariants to test:**
+    1. **Devig sums to 1 (P0.3):** For 100 random two-sided ML pairs, assert `devig_two_way`
+       output sums to 1.0 ± 1e-9. For single-sided input (P0.3 case), assert the output is
+       flagged or shrunk (not raw vigged).
+    2. **Kelly payout identity (P0.2 — already green):** Covered by `test_bench_p0_kelly.py`.
+    3. **`fair_spread_vigfree` honesty (P0.10):** Assert the key is `market_spread_raw` after
+       11.3 lands.
+    4. **Gaussian/Skellam agreement:** For sigma in [5, 50], assert `spread_cover_prob` and
+       `cover_prob_skellam` agree within 0.02.
+  - **Context:** "Create `code/tests/test_bench_market.py`. Test four invariants of
+    `pipeline/market.py` and `pipeline/devig.py`: (1) devig output sums to 1 for all two-sided
+    pairs; single-sided input is flagged/shrunk not raw (P0.3); (2) Kelly payout matches
+    american_to_decimal (already covered); (3) `market_spread_raw` key exists,
+    `fair_spread_vigfree` does not (P0.10); (4) Gaussian and Skellam cover probs agree within
+    0.02 for sigma in [5, 50]. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Test devig with extreme juice pairs (−10000/+5000) — does the
+    sum-to-1 invariant hold? Test Skellam with sigma=0.1 (near-degenerate) — does it crash or
+    return a sensible value?
+  - **Acceptance:** all green (or `xfail` for P0.3/P0.10 until those fixes land).
+- [ ] 10.2.4 — `test_bench_calibration.py`
+  - **File:** `code/tests/test_bench_calibration.py` (new)
+  - **Invariants to test:**
+    1. **Interval responds to residuals (P0.4):** Covered by 11.4's test.
+    2. **VA fail-closed (P0.9 — already green):** Covered by `test_bench_p0_venn_abers.py`.
+    3. **Isotonic min-sample floor:** `venn_abers.scores_to_interval` with 3 calibration points
+       should either raise or return a flagged low-confidence result (currently fits happily —
+       potential new bug).
+    4. **Disjoint-slice minimum-N:** `calibration_registry.chronological_game_id_partition`
+       with 25 games and 5 targets should assert/warn that each slice has < 5 games.
+  - **Context:** "Create `code/tests/test_bench_calibration.py`. Test four invariants of
+    `pipeline/elo_calibration.py`, `pipeline/venn_abers.py`, and
+    `pipeline/calibration_registry.py`: (1) `predict_interval` width changes after
+    `update_residuals` (P0.4); (2) VA filter fail-closed on NaN (P0.9, already green); (3)
+    isotonic with < 10 calibration points raises or flags low confidence; (4) disjoint-slice
+    partition asserts minimum N per slice. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Feed isotonic 2 points with identical scores but different labels —
+    does it produce a sensible probability or a degenerate step?
+  - **Acceptance:** all green or `xfail` with documented reason.
+- [ ] 10.2.5 — `test_bench_staking_grading.py`
+  - **File:** `code/tests/test_bench_staking_grading.py` (new)
+  - **Invariants to test:**
+    1. **Stake ≥ 0 always:** For 1000 random (cover_prob, juice, edge) combinations, assert
+       `compute_stake` returns ≥ 0.
+    2. **Stake → 0 as edge → 0:** Assert `compute_stake` with edge=0 returns 0.
+    3. **Push ⇒ 0 profit:** `grade_spread_bet` with exact push margin returns 0 profit.
+    4. **Caps before profit:** `compute_stake_profits` applies `apply_daily_caps` before
+       computing profit (already tested in `test_evaluation_stage4.py` — re-express with
+       extreme inputs).
+    5. **Bankroll never negative:** Simulate 100 consecutive losses with `simulate_bankroll`;
+       assert bankroll > 0 throughout.
+  - **Context:** "Create `code/tests/test_bench_staking_grading.py`. Test five invariants of
+    `pipeline/stake_profiles.py`, `pipeline/bet_grading.py`, and `pipeline/metrics.py`: (1)
+    stake ≥ 0 for 1000 random inputs; (2) stake = 0 when edge = 0; (3) push returns exactly 0
+    profit; (4) caps applied before profit; (5) bankroll never negative under 100-loss streak.
+    Use `tests.synth.factories.make_odds` for inputs. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Test with cover_prob=0.99 and juice=-10000 — does stake explode?
+    Test with cover_prob=0.01 — does stake go negative?
+  - **Acceptance:** all green.
 
 ### Task 10.3 — Property-based testing (Hypothesis)
-- [ ] 10.3.1 Add `hypothesis>=6` to `requirements-dev.txt` + `pyproject.toml` `[dev]`
-- [ ] 10.3.2 `test_bench_properties.py`: randomized group arrays for `PastOnlyGroupCV`/
-  `ManualOOFStacker` (tiny `n_groups` near `cv.py:135-137` degeneracy); round-trip
-  `residual_to_margin(margin_decision_residual(m,d),d) == m`
-- [ ] 10.3.3 Shrinking discipline: freeze each new failure into a permanent example test;
-  commit `.hypothesis/` examples policy
-- [ ] 10.3.4 Flake control: CI `@settings(max_examples=200, deadline=None, derandomize=True)`;
-  separate local exploration profile
+- [x] 10.3.1 — Add hypothesis to dev deps *(done in scaffold)*
+- [ ] 10.3.2 — `test_bench_properties.py`
+  - **File:** `code/tests/test_bench_properties.py` (new)
+  - **Properties to test:**
+    1. **PastOnlyGroupCV:** For random group arrays (varying cardinality, duplicates, tiny
+       n_groups), every fold satisfies `max(train_groups) < min(val_groups)`.
+    2. **Residual round-trip:** For random (margin, spread) pairs,
+       `residual_to_margin(margin_decision_residual(m, d), d) == m`.
+    3. **ManualOOFStacker:** For random feature matrices and group arrays, OOF predictions are
+       never generated from models trained on future rows.
+  - **Context:** "Create `code/tests/test_bench_properties.py`. Use Hypothesis with
+    `@settings(max_examples=200, deadline=None, derandomize=True)`. Test three properties: (1)
+    `PastOnlyGroupCV` fold chronology on random group arrays including edge cases (2 groups,
+    duplicate dates, single-date blocks); (2)
+    `residual_to_margin(margin_decision_residual(m, d), d) == m` for random floats; (3)
+    `ManualOOFStacker` never trains on future rows. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Hypothesis will auto-shrink failures. The reviewer must verify that
+    any discovered failure is frozen into a permanent example test.
+  - **Acceptance:** all properties green; `.hypothesis/` directory committed with example
+    database.
+- [ ] 10.3.3 — Shrinking discipline *(process, no code)*
+- [x] 10.3.4 — Flake control *(done in scaffold via CI settings)*
 
-### Task 10.4 — Leak canary harness (planted-signal tests)
-- [ ] 10.4.1 `code/tests/synth/canaries.py`: `PsychicFeature`, `TimeTravelerTracker`,
-  `FutureOddsQuote` — deliberately leaking components
-- [ ] 10.4.2 Assert every gate catches its canary (`PastOnlyGroupCV`, `promotion_gates`,
-  `CalibrationSliceRegistry`, odds provenance). A gate that *passes* a canary = failing test
-- [ ] 10.4.3 Chronology-tamper harness for roadmap 4.5.3 (SHA-256 dataset hash fails on
-  row-order permutation)
-- [ ] 10.4.4 Extend `negative_controls.py` permutation nulls into the bench runner per stage
+### Task 10.4 — Leak canary harness
+- [ ] 10.4.1 — Canaries *(stub exists in `code/tests/synth/canaries.py`)*
+  - **File:** `code/tests/synth/canaries.py` (extend)
+  - **Add:** `PsychicFeature.attach(df)` (exists), `TimeTravelerTracker` (exists),
+    `FutureOddsQuote` (exists). Add `SliceReuseAttack` — attempts to register the same
+    calibration slice twice.
+  - **Context:** "Extend `code/tests/synth/canaries.py` with a `SliceReuseAttack` class that
+    attempts to register the same row-id set with two different calibrators via
+    `CalibrationSliceRegistry`. Follow the existing canary style."
+  - **Adversarial check:** Verify each canary actually triggers its target gate (not just
+    exists).
+  - **Acceptance:** canary classes exist and are exercised by tests.
+- [ ] 10.4.2 — Gate-catches-canary tests
+  - **File:** `code/tests/test_bench_canaries.py` (new)
+  - **Tests:**
+    1. `PastOnlyGroupCV` rejects a `TimeTravelerTracker`-style row ordering (train on future).
+    2. `promotion_gates` reject a run with `PsychicFeature` (perfectly correlated feature).
+    3. `CalibrationSliceRegistry` raises on `SliceReuseAttack`.
+    4. Odds provenance rejects `FutureOddsQuote` (close before decision).
+  - **Context:** "Create `code/tests/test_bench_canaries.py`. For each canary in
+    `tests/synth/canaries.py`, write a test that asserts the corresponding gate catches it: (1)
+    `PastOnlyGroupCV` rejects future-in-train; (2) `promotion_gates` reject psychic features;
+    (3) `CalibrationSliceRegistry` raises on slice reuse; (4) odds provenance rejects
+    close-before-decision. A gate that passes a canary = failing test. Use `@pytest.mark.bench`."
+  - **Adversarial check:** Verify each canary is actually leaking (not just mislabeled) by
+    confirming the gate's rejection reason matches the leak type.
+  - **Acceptance:** all canary tests green.
+- [ ] 10.4.3 — Chronology-tamper harness
+  - **File:** `code/tests/test_bench_chronology.py` (new)
+  - **Test:** Compute SHA-256 of a synthetic dataset. Permute row order. Assert hash differs.
+    (This is the harness for roadmap 4.5.3.)
+  - **Context:** "Create `code/tests/test_bench_chronology.py`. Build a small synthetic dataset
+    via `tests.synth.factories`, compute its SHA-256 hash, permute row order, assert the hash
+    changes. This is the tamper-detection harness for roadmap task 4.5.3. Use
+    `@pytest.mark.bench`."
+  - **Acceptance:** hash changes on permutation; hash stable on identical re-generation.
+- [ ] 10.4.4 — Per-stage permutation nulls
+  - **File:** `code/tests/test_bench_permutation.py` (new)
+  - **Test:** For each rating engine (Elo, hierarchical, lineup, chemistry), shuffle outcome
+    labels and assert the engine's predictive signal drops to noise level.
+  - **Context:** "Create `code/tests/test_bench_permutation.py`. Use
+    `pipeline/negative_controls.py::shuffled_outcomes_destroy_edge` to verify that shuffling
+    outcome labels destroys each rating engine's signal. Test Elo, hierarchical, lineup Elo,
+    and chemistry trackers. Use `@pytest.mark.bench`."
+  - **Acceptance:** all engines show signal destruction under permutation.
 
 ### Task 10.5 — Golden-master differential oracles
-- [ ] 10.5.1 `code/tests/synth/golden.py`: fixed synthetic 40-game season (seed-locked);
-  snapshot ratings/features/probs/stakes as JSON
-- [ ] 10.5.2 Differential checks: four `devig.py` methods agree on 2-way books; Skellam vs
-  Gaussian converge as σ grows; `fit_static` vs `replay_rolling` divergence stays documented
-- [ ] 10.5.3 Golden diffs fail CI on numeric drift (explicit acknowledgment required for
-  formula changes)
-- [ ] 10.5.4 Version golden files with `FEATURE_SCHEMA_VERSION` so schema bumps require
-  deliberate regeneration
+- [ ] 10.5.1 — Golden season generator
+  - **File:** `code/tests/synth/golden.py` (extend)
+  - **Add:** `generate_golden_season(seed=20260919)` → 40-game synthetic season DataFrame;
+    `snapshot_stage_outputs(season_df)` → dict of stage outputs (ratings, features, probs,
+    stakes).
+  - **Context:** "Extend `code/tests/synth/golden.py` with `generate_golden_season(seed)`
+    producing a fixed 40-game synthetic season and `snapshot_stage_outputs(season_df)` running
+    each pipeline stage and collecting outputs into a JSON-serializable dict. Use
+    `write_golden`/`load_golden` for persistence. Version with `FEATURE_SCHEMA_VERSION`."
+  - **Adversarial check:** Verify two calls with the same seed produce identical snapshots;
+    verify changing a formula constant changes the snapshot.
+  - **Acceptance:** golden file committed; regeneration is deterministic.
+- [ ] 10.5.2 — Differential checks
+  - **File:** `code/tests/test_bench_differential.py` (new)
+  - **Tests:** (1) All four `devig.py` methods agree within 0.01 on 2-way books; (2) Skellam vs
+    Gaussian cover probs converge as sigma → 50; (3) `fit_static` vs
+    `replay_rolling_spread_calibration` divergence is documented and bounded.
+  - **Context:** "Create `code/tests/test_bench_differential.py`. Test that all four devig
+    methods in `pipeline/devig.py` agree within 0.01 on two-way books; that Skellam and
+    Gaussian cover probabilities converge as sigma grows; and that `fit_static` vs
+    `replay_rolling_spread_calibration` divergence is bounded and documented. Use
+    `@pytest.mark.bench`."
+  - **Acceptance:** all differential checks green.
+- [ ] 10.5.3 — Golden diff CI gate
+  - **File:** `.github/workflows/ci.yml` (extend)
+  - **Add:** A step that runs the golden-master comparison and fails if any numeric drift is
+    detected without a corresponding `FEATURE_SCHEMA_VERSION` bump.
+  - **Context:** "Add a CI step to `.github/workflows/ci.yml` that runs
+    `pytest tests/test_bench_golden.py` and fails on numeric drift. The test should compare
+    current pipeline outputs against the committed golden snapshot and require explicit
+    regeneration (via a `--regenerate-golden` flag) when `FEATURE_SCHEMA_VERSION` changes."
+  - **Acceptance:** CI fails on drift without version bump; passes after regeneration with
+    bump.
+- [x] 10.5.4 — Version-locked golden files *(covered by 10.5.1's `FEATURE_SCHEMA_VERSION`
+  integration)*
 
-### Task 10.6 — P0 regression battery (acceptance for current bug fixes)
-- [ ] 10.6.1 One bench-style test per P0.1–P0.10 (extreme input makes the bug unmissable),
-  each citing its GitHub issue + planned `LEAK_REGISTRY.md` ID. Red until fixed, green after
-- [ ] 10.6.2 P0.11: synthetic two-snapshot odds fixture (decision ≠ close) proving the CLV
-  path *can* produce finite values end-to-end
+### Task 10.6 — P0 regression battery
+- [ ] 10.6.1 — Remaining P0 tests
+  - **Status:** P0.2 and P0.9 done (green). P0.1, P0.3, P0.4, P0.5, P0.6, P0.7, P0.8, P0.10
+    need tests.
+  - **Files:** `test_bench_p0_home_boost.py` (11.1), `test_bench_p0_garbage_weight.py` (11.2),
+    `test_bench_p0_vigfree_honesty.py` (11.3), `test_bench_p0_interval_updates.py` (11.4),
+    `test_bench_p0_hapm_shrink.py` (11.5), plus `test_bench_lineup_chemistry.py` (10.2.2 covers
+    P0.1), `test_bench_market.py` (10.2.3 covers P0.3, P0.10), `test_bench_calibration.py`
+    (10.2.4 covers P0.4).
+  - **Note:** P0.5 (RD as games-played counter) is a design issue, not a one-line fix — its
+    test belongs in `test_bench_ratings.py` (10.2.1) as the "RD responds to outcome surprise"
+    invariant, marked `xfail` until Epic 9.1 (Kalman) lands.
+- [ ] 10.6.2 — P0.11 CLV synthetic fixture
+  - **File:** `code/tests/test_bench_p0_clv.py` (new)
+  - **Test:** Create synthetic odds with `decision_spread=-3.5, closing_spread=-5.0`. Run the
+    CLV computation path. Assert `point_clv` is finite and equals `decision - close = 1.5`.
+  - **Context:** "Create `code/tests/test_bench_p0_clv.py`. Build synthetic odds with
+    decision_spread=-3.5 and closing_spread=-5.0 via `tests.synth.factories.make_odds`. Run the
+    CLV path from `pipeline/market_snapshots.py` or `pipeline/metrics.py`. Assert `point_clv`
+    is finite and equals 1.5. This isolates whether the dead CLV in the latest full run is
+    data-provenance or pipeline logic. Use `@pytest.mark.bench`. Cite P0.11."
+  - **Acceptance:** CLV is finite and correct on synthetic two-snapshot data.
 
 ### Task 10.7 — CI & reporting integration
-- [ ] 10.7.1 `@pytest.mark.bench`; separate CI job with <5 min budget so property tests do
-  not slow the leak/smoke gate (`.github/workflows/ci.yml`)
-- [ ] 10.7.2 Bench summary report → `output/bench/latest.json` + dashboard Documentation tab
-  (extends Epic 7.5)
-- [ ] 10.7.3 Coverage gate on the bench run (`pytest --cov=pipeline`) to measure which modules
-  the bench touches vs the classic suite (feeds 6.1.2)
+- [x] 10.7.1 — Bench CI job *(done in scaffold)*
+- [ ] 10.7.2 — Bench summary report
+  - **File:** `code/tests/test_bench_report.py` (new) + `code/dashboard/services/bench.py`
+    (new)
+  - **Change:** A pytest sessionfinish hook that writes `output/bench/latest.json` with
+    per-file pass/fail/xfail counts. A dashboard service that reads this file and surfaces it
+    on the Documentation tab.
+  - **Context:** "Create a pytest hook in `code/tests/conftest.py` that writes
+    `output/bench/latest.json` after bench runs with per-file pass/fail/xfail counts. Create
+    `code/dashboard/services/bench.py` that reads this file and returns a summary dict. Wire it
+    into the dashboard Documentation tab."
+  - **Acceptance:** JSON report written after bench run; dashboard displays it.
+- [ ] 10.7.3 — Coverage gate
+  - **File:** `.github/workflows/ci.yml` (extend)
+  - **Add:** `pytest --cov=pipeline --cov-report=term-missing --cov-report=json:output/bench/coverage.json`
+    to the bench CI step.
+  - **Acceptance:** coverage report generated; visible in CI artifacts.
 
 ### Task 10.8 — Registry & docs integration
-- [ ] 10.8.1 `LEAK_REGISTRY.md` scope note: bench-caught defects get IDs like `bench_<name>`;
-  broaden registry to confirmed non-temporal defects
-- [ ] 10.8.2 `docs/pipeline.md` section: how to add a stage (`test_bench_<module>.py`)
-- [ ] 10.8.3 Anti-roadmap: "do not tune constants against the bench"; "do not treat
-  bench-green as leak-proof — bench proves known bug classes, real data proves the rest"
+- [x] 10.8.1 — Registry scope note *(done in scaffold)*
+- [x] 10.8.2 — Pipeline docs section *(done in scaffold)*
+- [x] 10.8.3 — Anti-roadmap additions *(done in scaffold)*
 
 **Risks when adding this epic:**
 1. **Synthetic overfitting** — bench asserts invariants, never accuracy targets; constants
@@ -273,6 +563,79 @@ permutation nulls (10.4.4).
 5. **False confidence** — green bench ≠ no leaks; complements walk-forward, never replaces it
 6. **Maintenance surface** — ~9 new test files; each maps to a P0/registry bug class; per-stage
    naming keeps growth disciplined
+
+### Fleet orchestration design
+
+*How to run Epic 10/11 with a fleet of small agents instead of one monolithic agent.*
+
+Each task above (11.1-11.5, 10.1.1-10.8.3) is sized for a single agent with minimal context:
+one new file (or one edit), one invariant family, no more than 3 source modules to read.
+
+```mermaid
+flowchart TD
+    orchestrator["Orchestrator<br>reads roadmap, dispatches tasks"] --> agent1["Agent 1<br>Task 11.1<br>home_boost fix"]
+    orchestrator --> agent2["Agent 2<br>Task 11.2<br>garbage weight fix"]
+    orchestrator --> agent3["Agent 3<br>Task 10.2.1<br>ratings invariants"]
+    orchestrator --> agent4["Agent 4<br>Task 10.2.3<br>market invariants"]
+    agent1 --> review1["Adversarial reviewer<br>tries to falsify"]
+    agent2 --> review2["Adversarial reviewer<br>tries to falsify"]
+    agent3 --> review3["Adversarial reviewer<br>tries to falsify"]
+    agent4 --> review4["Adversarial reviewer<br>tries to falsify"]
+    review1 --> gate["Gate: all green +<br>no counterexamples"]
+    review2 --> gate
+    review3 --> gate
+    review4 --> gate
+```
+
+#### Agent prompt template
+
+Each agent receives:
+
+1. **Task ID and title** (e.g., "Task 10.2.1 — ratings invariants")
+2. **Context** (the exact text from the "Context" field in the task detail above)
+3. **Files to read** (max 3 source modules + 1 test file to create)
+4. **Acceptance criteria** (the exact tests that must pass)
+5. **Adversarial instruction** ("After writing the tests, attempt to construct a counterexample
+   input that passes your test but violates the invariant. If you find one, tighten the test.")
+
+#### Dependency graph (what can run in parallel)
+
+| Wave | Tasks                                                          | Why                                         |
+| ---- | -------------------------------------------------------------- | ------------------------------------------- |
+| 1    | 11.1, 11.2, 11.3 (quick wins)                                  | Independent single-file fixes               |
+| 2    | 11.4, 11.5 (quick wins)                                        | Slightly more complex, still independent    |
+| 3    | 10.1.1, 10.1.3 (factory extensions)                            | Needed by 10.2.x tests                      |
+| 4    | 10.2.1, 10.2.2, 10.2.3, 10.2.4, 10.2.5 (stage invariants)      | All independent, need factories from wave 3 |
+| 5    | 10.3.2, 10.4.1, 10.4.2, 10.4.3, 10.4.4 (properties + canaries) | Need stage invariants from wave 4           |
+| 6    | 10.5.1, 10.5.2 (golden masters)                                | Need all stage tests from wave 4            |
+| 7    | 10.6.2 (CLV fixture)                                           | Independent                                 |
+| 8    | 10.7.2, 10.7.3 (CI + reporting)                                | Need all tests from waves 4-6               |
+
+#### Token budget per agent
+
+| Task type                | Estimated tokens | Why                                               |
+| ------------------------ | ----------------- | -------------------------------------------------- |
+| Quick win (11.x)         | 2-4k              | 1-2 file reads, 1-line fix, 1 test                |
+| Stage invariant (10.2.x) | 4-8k              | 2-3 module reads, 1 test file with 3-5 tests      |
+| Property test (10.3.2)   | 6-10k             | Hypothesis setup, 3 properties                    |
+| Canary (10.4.x)          | 4-6k              | 1 canary class + 1 test file                      |
+| Golden master (10.5.x)   | 8-12k             | Season generator + snapshot + differential checks |
+
+Total fleet budget: ~60-100k tokens across ~15 agents (vs ~200k+ for a single monolithic
+agent).
+
+#### Adversarial review protocol
+
+After each agent completes its task:
+
+1. A **reviewer agent** (or the same agent re-prompted) receives only the new test file and the
+   invariant description.
+2. The reviewer's job: construct an input that passes the test but violates the invariant.
+3. If a counterexample is found, the test is tightened and re-reviewed.
+4. If no counterexample is found after 3 attempts, the test is accepted.
+
+This protocol catches "tests that pass but don't actually test the invariant" — the most
+common failure mode of generated tests.
 
 ---
 
