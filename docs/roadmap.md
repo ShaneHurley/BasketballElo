@@ -170,6 +170,110 @@ by construction.*
 - [ ] 9.5 Altitude × rest interaction in `PaceTracker.get_expected_pace` (`ALTITUDE_TEAMS`
   exists in `config.py`; `is_altitude` is currently a bare additive flag)
 
+## Epic 10 — Synthetic formula test bench & adversarial stress harness *(new)*
+
+*Real NBA data clusters in a narrow band (margins ±30, possessions ~90–110, juice near −110).
+Formula bugs hide there. This epic builds a dedicated test-support package under
+`code/tests/synth/` that feeds deliberately unrealistic, extreme, and adversarial fake data
+through every pipeline stage so mathematical invariants (symmetry, conservation, monotonicity,
+boundedness) become unmissable. The 11 verified P0 bugs are the first acceptance battery.
+Execution order: 10.1 → 10.6 → 10.2 → 10.4 → 10.3 → 10.5 → 10.7 → 10.8.*
+
+**Do not rebuild:** `pipeline/synthetic_research.py` is TVAE/SDV *augmentation* gating — a
+different purpose. Reuse only its constraint ideas. Copy the docstring/registry-ID convention
+from `tests/test_cv_past_only.py`. Extend `pipeline/negative_controls.py` for per-stage
+permutation nulls (10.4.4).
+
+### Task 10.1 — Synthetic data factory layer
+- [ ] 10.1.1 New `code/tests/synth/factories.py`: `make_stint(...)`, `make_game(...)`,
+  `make_odds(ml_h, ml_a, spread, total, juice)`, `make_player_season(...)` — schema-identical
+  to `stints.py` / odds loaders; deterministic via explicit `seed=` everywhere
+- [ ] 10.1.2 Extreme preset library in `code/tests/synth/presets.py`: `BLOWOUT_60`,
+  `ZERO_POSSESSION_FT_STINT`, `ONE_SIDED_ODDS_FEED`, `JUICE_EXTREMES`
+  (−10000/+10000/−100/+5000), `ROOKIE_VS_5000_GAME_VET`, `NAN_STORM`,
+  `SINGLE_LINEUP_ALL_SEASON`, `DISJOINT_LINEUPS_EVERY_STINT`
+- [ ] 10.1.3 Schema-parity test: factory output passes the same validation real ingest applies
+  (`test_ingest_formats.py`-style) so bench failures mean formula bugs, not fake-data artifacts
+- [ ] 10.1.4 Document in `code/tests/synth/README.md`: bench is for *invariant/adversarial*
+  testing, never for tuning constants (bench-derived constants = new soft-leak class)
+
+### Task 10.2 — Stage-by-stage formula invariant battery
+- [ ] 10.2.1 `test_bench_ratings.py` — `ratings.py`: home/away symmetry (swap teams → ratings
+  mirror), RD bounded in `[rd_floor, 350]`, K-decay monotonicity, garbage-weight idempotence
+  (applying twice ≠ applying once — catches P0.8)
+- [ ] 10.2.2 `test_bench_lineup_chemistry.py` — `lineup_elo.py`/`chemistry.py`: mirrored-update
+  invariant (fails today = P0.1), on/off `off` leg written, shrinkage → 0 as n → 0 and → raw
+  as n → ∞
+- [ ] 10.2.3 `test_bench_market.py` — `market.py`/`devig.py`: devig sums to 1 including
+  single-sided (P0.3), `spread_kelly_fraction` payout `b == american_to_decimal(juice) − 1`
+  (P0.2), `fair_spread_vigfree` honesty (P0.10), Gaussian/Skellam agree at σ extremes
+- [ ] 10.2.4 `test_bench_calibration.py` — `elo_calibration.py`/`venn_abers.py`/
+  `calibration_registry.py`: interval responds to `update_residuals` (P0.4), VA fail-closed
+  on NaN (P0.9), isotonic min-sample floors, disjoint-slice minimum-N
+- [ ] 10.2.5 `test_bench_staking_grading.py` — stake ≥ 0, stake → 0 as edge → 0, push ⇒ 0
+  profit, caps before profit, bankroll never negative under 100-loss streak
+
+### Task 10.3 — Property-based testing (Hypothesis)
+- [ ] 10.3.1 Add `hypothesis>=6` to `requirements-dev.txt` + `pyproject.toml` `[dev]`
+- [ ] 10.3.2 `test_bench_properties.py`: randomized group arrays for `PastOnlyGroupCV`/
+  `ManualOOFStacker` (tiny `n_groups` near `cv.py:135-137` degeneracy); round-trip
+  `residual_to_margin(margin_decision_residual(m,d),d) == m`
+- [ ] 10.3.3 Shrinking discipline: freeze each new failure into a permanent example test;
+  commit `.hypothesis/` examples policy
+- [ ] 10.3.4 Flake control: CI `@settings(max_examples=200, deadline=None, derandomize=True)`;
+  separate local exploration profile
+
+### Task 10.4 — Leak canary harness (planted-signal tests)
+- [ ] 10.4.1 `code/tests/synth/canaries.py`: `PsychicFeature`, `TimeTravelerTracker`,
+  `FutureOddsQuote` — deliberately leaking components
+- [ ] 10.4.2 Assert every gate catches its canary (`PastOnlyGroupCV`, `promotion_gates`,
+  `CalibrationSliceRegistry`, odds provenance). A gate that *passes* a canary = failing test
+- [ ] 10.4.3 Chronology-tamper harness for roadmap 4.5.3 (SHA-256 dataset hash fails on
+  row-order permutation)
+- [ ] 10.4.4 Extend `negative_controls.py` permutation nulls into the bench runner per stage
+
+### Task 10.5 — Golden-master differential oracles
+- [ ] 10.5.1 `code/tests/synth/golden.py`: fixed synthetic 40-game season (seed-locked);
+  snapshot ratings/features/probs/stakes as JSON
+- [ ] 10.5.2 Differential checks: four `devig.py` methods agree on 2-way books; Skellam vs
+  Gaussian converge as σ grows; `fit_static` vs `replay_rolling` divergence stays documented
+- [ ] 10.5.3 Golden diffs fail CI on numeric drift (explicit acknowledgment required for
+  formula changes)
+- [ ] 10.5.4 Version golden files with `FEATURE_SCHEMA_VERSION` so schema bumps require
+  deliberate regeneration
+
+### Task 10.6 — P0 regression battery (acceptance for current bug fixes)
+- [ ] 10.6.1 One bench-style test per P0.1–P0.10 (extreme input makes the bug unmissable),
+  each citing its GitHub issue + planned `LEAK_REGISTRY.md` ID. Red until fixed, green after
+- [ ] 10.6.2 P0.11: synthetic two-snapshot odds fixture (decision ≠ close) proving the CLV
+  path *can* produce finite values end-to-end
+
+### Task 10.7 — CI & reporting integration
+- [ ] 10.7.1 `@pytest.mark.bench`; separate CI job with <5 min budget so property tests do
+  not slow the leak/smoke gate (`.github/workflows/ci.yml`)
+- [ ] 10.7.2 Bench summary report → `output/bench/latest.json` + dashboard Documentation tab
+  (extends Epic 7.5)
+- [ ] 10.7.3 Coverage gate on the bench run (`pytest --cov=pipeline`) to measure which modules
+  the bench touches vs the classic suite (feeds 6.1.2)
+
+### Task 10.8 — Registry & docs integration
+- [ ] 10.8.1 `LEAK_REGISTRY.md` scope note: bench-caught defects get IDs like `bench_<name>`;
+  broaden registry to confirmed non-temporal defects
+- [ ] 10.8.2 `docs/pipeline.md` section: how to add a stage (`test_bench_<module>.py`)
+- [ ] 10.8.3 Anti-roadmap: "do not tune constants against the bench"; "do not treat
+  bench-green as leak-proof — bench proves known bug classes, real data proves the rest"
+
+**Risks when adding this epic:**
+1. **Synthetic overfitting** — bench asserts invariants, never accuracy targets; constants
+   may never be derived from bench output
+2. **Factory drift** — schema-parity test (10.1.3) against real ingest validators
+3. **Golden-master brittleness** — regeneration is an explicit reviewed step tied to
+   `FEATURE_SCHEMA_VERSION` (10.5.4)
+4. **Hypothesis flakiness** — derandomized CI profile + separate marker/budget (10.3.4, 10.7.1)
+5. **False confidence** — green bench ≠ no leaks; complements walk-forward, never replaces it
+6. **Maintenance surface** — ~9 new test files; each maps to a P0/registry bug class; per-stage
+   naming keeps growth disciplined
+
 ---
 
 **Primary optimization targets:** lower spread **MAE**, higher **winner** accuracy, better
@@ -470,6 +574,7 @@ of a Kalman gain. Implement as Epic 9.1 and close this task when it lands.*
 | **Winner accuracy ↑** | 4.1 GBM ensemble, 4.2 archetype clusters, 2.4 Kalman now-casting, 3.1 dual-window ratings, 3.4 season priors |
 | **Totals calibration ↑** | 5.6 totals decomposition + Skellam clusters, 1.6 tempo-dictation, 3.6 Markov game-flow, 4.4 Monte Carlo sims |
 | **CLV / ROI ↑** | 5.1 line shopping, 5.5 Venn-Abers bounds, 5.7 temporal de-vig, 5.8 CVaR staking, 5.3 composite mode |
+| **Bug/leak catch ↑** | Epic 10 synthetic formula test bench (P0 battery, stage invariants, leak canaries) |
 
 ## Explicit non-goals (anti-roadmap)
 
@@ -487,6 +592,10 @@ From `code/README.md` / leak registry:
   comments; future policy constants must be set on a designated config-tuning season only)
 - Do not add new features on top of P0-bug state (home-only lineup training, frozen intervals,
   fake RD) — fix the base layer first
+- Do not tune constants against the synthetic formula test bench (Epic 10) — that is synthetic
+  overfitting; the bench asserts invariants, never accuracy targets
+- Do not treat bench-green as leak-proof — the bench proves known bug classes; walk-forward
+  real-data evaluation proves the rest
 - Do not rebuild what exists (Venn-Abers, Skellam, de-vig, shot quality, past-only CV) — extend it
 - Respect the ~65–72% winner-accuracy ceiling literature; chase calibration and CLV, not raw accuracy records
 

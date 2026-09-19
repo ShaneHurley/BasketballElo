@@ -66,3 +66,19 @@ Load pickled trackers + meta models from `state/` → optional ESPN injuries →
 ## Train/serve contract
 
 Pre-game features come only from **past** state (`lineup_cache`, versioned EPM, rolling trackers). Post-game `update_trackers_after_game` mutates state **after** the prediction row is frozen. Violations of this contract are what the leak registry exists to prevent.
+
+## Synthetic formula test bench (Epic 10)
+
+Adversarial / extreme-input tests live under `code/tests/synth/` and `tests/test_bench_*.py`.
+They are **not** production code and must never be imported from `pipeline/`.
+
+| Piece | Path |
+|-------|------|
+| Factories / presets / canaries | `code/tests/synth/` |
+| Stage invariant suites | `tests/test_bench_<module>.py` |
+| P0 acceptance battery | `tests/test_bench_p0_*.py` |
+| Marker | `@pytest.mark.bench` — run with `pytest -m bench` |
+
+When adding a new pipeline module with non-trivial math: add a `test_bench_<module>.py`
+that asserts invariants (symmetry, bounds, identities) on factory/preset inputs. Do **not**
+tune `config.py` constants against bench outcomes (anti-roadmap).
