@@ -13,6 +13,8 @@ from pipeline.config import (
     GOOD_BET_EDGE,
     STATE_DIR,
     SPREAD_CALIB_WINDOW,
+    SPREAD_CALIB_WINDOW_CANDIDATES,
+    SPREAD_CALIB_ADAPTIVE_WINDOW,
     BET_SELECTION_MODE,
     WALKFORWARD_EDGE_MIN_FLOOR,
     CALIBRATION_MODE,
@@ -24,14 +26,23 @@ from pipeline.config import (
     CONFIDENCE_CALIB_SCOPE,
     CONFIDENCE_MODE,
     CONFIDENCE_SELECTION_MODE,
+    CONFIDENCE_EDGE_SCALED,
     ML_CALIB_METHOD,
     ML_CALIB_SCOPE,
     MIN_ML_WIN_PCT,
     ML_MAX_FAVORITE_DECIMAL_DEFAULT,
     OU_MIN_EDGE,
     CONFIDENCE_MIN_EDGE,
+    MAX_QUANTILE_WIDTH,
+    MIN_DISAGREEMENT_TRUST,
+    SKIP_TIGHT_SPREAD,
+    EDGE_AVOID_BAND,
+    MIN_EDGE_BUCKET,
+    CONFIDENCE_GATE_MAX_LIFT,
     ARTIFACT_SCHEMA_VERSION,
     TOTAL_HEAD_CV_SANITY_CAP,
+    RATING_HISTORY_USE_ALL,
+    MODEL_TRAIN_WINDOW_DEFAULT,
 )
 from pipeline.ml_calibration import WalkForwardMLCalibrator, default_ml_calibrator_path
 from pipeline.calibration_policy import should_use_season1_calibrator
@@ -86,6 +97,8 @@ from pipeline.bet_confidence import (
 )
 from pipeline.market_disagreement import WalkForwardMarketDisagreementModel, default_disagreement_path
 from pipeline.ats_classifier import ATSClassifier
+from pipeline.upset_classifier import UpsetClassifier
+from pipeline.data_paths import clamp_rolling_window, split_rating_and_model_seasons
 
 
 def _series_last_optional_float(df: pd.DataFrame, col: str, default=None):
@@ -98,6 +111,46 @@ def _series_last_optional_float(df: pd.DataFrame, col: str, default=None):
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def select_spread_calib_window(
+    prior_df: pd.DataFrame,
+    *,
+    candidates: tuple[int, ...] | list[int] | None = None,
+    default: int | None = None,
+    pred_col: str = "RAW_PRED_MARGIN",
+    actual_col: str = "ACTUAL_MARGIN",
+) -> int:
+    """Pick rolling spread window by prior-season corrected MAE (walk-forward)."""
+    from pipeline.market import replay_rolling_spread_calibration
+
+    default_w = int(default if default is not None else SPREAD_CALIB_WINDOW)
+    cands = tuple(candidates or SPREAD_CALIB_WINDOW_CANDIDATES or (default_w,))
+    if prior_df is None or prior_df.empty:
+        return default_w
+    if pred_col not in prior_df.columns or actual_col not in prior_df.columns:
+        return default_w
+    pred = pd.to_numeric(prior_df[pred_col], errors="coerce").values
+    actual = pd.to_numeric(prior_df[actual_col], errors="coerce").values
+    mask = np.isfinite(pred) & np.isfinite(actual)
+    if mask.sum() < 40:
+        return default_w
+    pred, actual = pred[mask], actual[mask]
+    best_w, best_mae = default_w, float("inf")
+    for w in cands:
+        w = int(w)
+        if w < 10:
+            continue
+        corrected, _ = replay_rolling_spread_calibration(
+            pred, actual,
+            window=w,
+            min_samples=min(30, max(10, w // 3)),
+            mode="linear",
+        )
+        mae = float(np.mean(np.abs(np.asarray(corrected, dtype=float) - actual)))
+        if np.isfinite(mae) and mae < best_mae - 1e-9:
+            best_mae, best_w = mae, w
+    return int(best_w)
 
 
 from pipeline.elo_calibration import (
@@ -124,6 +177,7 @@ from pipeline.simulate import run_simulation
 
 __all__ = [
     "run_multi_year_backtest_walkforward",
+    "select_spread_calib_window",
     "benchmark_results",
     "grid_search_bet_edge",
     "walkforward_edge_threshold",
@@ -154,7 +208,7 @@ def run_multi_year_backtest_walkforward(
     n_tuning_trials_meta: int = 40,
     n_tuning_trials_total: int = 15,
     n_tuning_trials_meta_win: int | None = None,
-    rolling_window_size: int = 3,
+    rolling_window_size: int = MODEL_TRAIN_WINDOW_DEFAULT,
     model_kwargs: dict = None,
     feature_cols: list = None,
     walkforward_edge: bool = True,
@@ -167,11 +221,21 @@ def run_multi_year_backtest_walkforward(
     fast_tuning: bool = False,
     require_elo_agreement: bool = False,
     use_hapm_priors: bool = False,
+    rating_history_use_all: bool | None = None,
+    use_venn_abers_filter: bool | None = None,
 ) -> pd.DataFrame:
     """
     True walk-forward backtest with NO data leakage.
+
+    ``rolling_window_size`` controls *model-train* seasons (clamped 2–5).
+    When ``rating_history_use_all`` is True (default from config), Elo/hier/
+    pace engines are warm-started on every season before the test fold, then
+    meta models train only on the rolling model window.
     """
-    rolling_window_size = int(max(2, min(3, rolling_window_size)))
+    rolling_window_size = clamp_rolling_window(rolling_window_size)
+    use_all_rating = (
+        RATING_HISTORY_USE_ALL if rating_history_use_all is None else bool(rating_history_use_all)
+    )
     if n_tuning_trials_meta_win is None:
         n_tuning_trials_meta_win = min(n_tuning_trials_meta, 25)
     stints_df = stints_df.copy()
@@ -181,7 +245,17 @@ def run_multi_year_backtest_walkforward(
 
     all_seasons = sorted(stints_df['season'].dropna().unique())
     print(f"\n🚀 Walk-forward over {len(all_seasons)} seasons: {all_seasons}")
-    print(f"   Rolling window size = {rolling_window_size} season(s)")
+    print(
+        f"   Model-train window = {rolling_window_size} season(s); "
+        f"rating history = {'all prior' if use_all_rating else 'model window only'}"
+    )
+    print(
+        f"   Bet gates: mode={BET_SELECTION_MODE}  min_edge={CONFIDENCE_MIN_EDGE}  "
+        f"bucket_min={MIN_EDGE_BUCKET}  min_conf={MIN_CONFIDENCE_SCORE}  "
+        f"gate_lift≤{CONFIDENCE_GATE_MAX_LIFT}  max_width={MAX_QUANTILE_WIDTH}  "
+        f"trust>={MIN_DISAGREEMENT_TRUST}  tight_spread={'on' if SKIP_TIGHT_SPREAD else 'off'}  "
+        f"avoid_band={EDGE_AVOID_BAND}  edge_scaled={CONFIDENCE_EDGE_SCALED}"
+    )
 
     compiled_results = []
     phase2a_rows: list[dict] = []
@@ -197,30 +271,45 @@ def run_multi_year_backtest_walkforward(
         model_kwargs = {
             "total_mode": "external",
             "use_elo_stack": True,
-            "train_target": "close_residual",
+            "train_target": "decision_residual",
             "use_quantile_heads": True,
             "prediction_mode": "absolute",
         }
 
-    full_elo = full_hier = meta_model = win_model = total_model = score_pair_model = ats_classifier = None
+    full_elo = full_hier = meta_model = win_model = total_model = score_pair_model = ats_classifier = upset_classifier = None
     sim_pace = sim_xppp = sim_form = sim_rotation = None
     sim_lineup_elo = sim_chemistry = sim_team_elo = sim_travel = sim_epm = None
     sim_vol = None
     last_good_total_params = None
+    ats_status_records: list = []
+    cover_prob_calibrator = None
+
+    active_spread_window = int(SPREAD_CALIB_WINDOW)
 
     for i, test_season in enumerate(all_seasons):
+        cover_prob_calibrator = None
         print(f"\n{'='*65}")
         print(f"🚀 SIMULATING SEASON {int(test_season)-1}-{int(test_season)}")
         print('='*65)
 
-        train_seasons = all_seasons[max(0, i - rolling_window_size):i]
+        rating_history_seasons, model_train_seasons = split_rating_and_model_seasons(
+            all_seasons, i, rolling_window_size, rating_history_use_all=use_all_rating,
+        )
+        train_seasons = model_train_seasons
         if not train_seasons:
             print("  [!] No previous seasons – skipping (no training data).")
             continue
 
-        print(f"  Training on seasons: {train_seasons}")
+        warm_seasons = [s for s in rating_history_seasons if s not in set(model_train_seasons)]
+        print(f"  Model-train seasons: {train_seasons}")
+        if warm_seasons:
+            print(f"  Rating warm-start seasons: {warm_seasons}")
         train_stints = stints_df[stints_df['season'].isin(train_seasons)].copy()
         test_stints = stints_df[stints_df['season'] == test_season].copy()
+        warm_stints = (
+            stints_df[stints_df['season'].isin(warm_seasons)].copy()
+            if warm_seasons else stints_df.iloc[0:0].copy()
+        )
 
         # Tune Elo / Hier (with cache)
         best_elo = load_cached("elo", train_seasons, train_stints) if use_tuning_cache else None
@@ -284,18 +373,29 @@ def run_multi_year_backtest_walkforward(
         base_shot_quality = ShotQualityTracker()
         base_hapm = HapmPriorTracker()
         if use_hapm_priors:
-            # `base_hapm` is fit once on the *entire* train_stints span for
-            # legitimate use later against `test_season` only (strictly
-            # after every game in train_stints — no leak there). It must
-            # NOT be used as a static lookup for games *inside* train_stints
-            # itself (that was the `hapm_before_split_leak`: an early
-            # base/calib-slice game's HAPM feature would then reflect
-            # dyad/trio coefficients estimated from later games in the same
-            # span). `hapm_train_lookup` below is the leak-free replacement
-            # used for base_features/calib_features generation.
-            base_hapm.fit(train_stints)
+            # Warm-start + model-train span for post-train test-season simulation only.
+            hist_for_hapm = (
+                stints_df[stints_df["season"].isin(rating_history_seasons)].copy()
+                if rating_history_seasons else train_stints
+            )
+            base_hapm.fit(hist_for_hapm)
         hapm_train_lookup = hapm_lookup_for_training(train_stints) if use_hapm_priors else None
         base_epm = EpmPriorTracker()
+
+        # Warm-start engines on earlier seasons (ratings only; features discarded).
+        if not warm_stints.empty:
+            print(f"  🔥 Warm-starting engines on {len(warm_seasons)} prior season(s)...")
+            _ = generate_features(
+                warm_stints, base_hier, base_elo, base_pace,
+                odds_dict=odds_dict, update_engines=True,
+                team_xppp_tracker=base_xppp, team_form_tracker=base_form,
+                rotation_tracker=base_rotation, lineup_elo_tracker=base_lineup_elo,
+                chemistry_tracker=base_chemistry, team_elo_tracker=base_team_elo,
+                travel_tracker=base_travel, epm_tracker=base_epm,
+                ref_tracker=base_ref,
+                shot_quality_tracker=base_shot_quality,
+                hapm_tracker=None,  # past-only lookup is for model-train rows only
+            )
 
         base_features = generate_features(
             base_stints, base_hier, base_elo, base_pace,
@@ -389,7 +489,7 @@ def run_multi_year_backtest_walkforward(
                 base_features, n_trials=n_tuning_trials_meta, feature_cols=feature_cols,
                 bounds=param_bounds, season=int(test_season),
                 fast_mode=fast_tuning or n_tuning_trials_meta <= 5,
-                train_target=(model_kwargs or {}).get("train_target", "close_residual"),
+                train_target=(model_kwargs or {}).get("train_target", "decision_residual"),
             )
             if use_tuning_cache:
                 save_cached("meta", train_seasons, best_params, train_stints)
@@ -401,6 +501,8 @@ def run_multi_year_backtest_walkforward(
         elo_knobs.elo_blend_alpha = best_params.get(
             "elo_blend_alpha", elo_knobs.elo_blend_alpha,
         )
+        from pipeline.config import ELO_BLEND_ALPHA_MAX
+        elo_knobs.elo_blend_alpha = float(min(float(elo_knobs.elo_blend_alpha), float(ELO_BLEND_ALPHA_MAX)))
         elo_knobs.elo_ridge_alpha = best_params.get(
             "elo_ridge_alpha", elo_knobs.elo_ridge_alpha,
         )
@@ -469,22 +571,72 @@ def run_multi_year_backtest_walkforward(
                 )
                 total_model.fit(base_features)
 
-            # Dual-head home/away score model (specialized totals path)
+        # Always fit the canonical paired score model (actual home/away points).
+        from pipeline.config import USE_CANONICAL_SCORE_PAIR
+        from pipeline.score_targets import score_safe_feature_cols
+        from pipeline.model import tune_score_pair_model
+
+        if score_pair_model is None and (tune_total_head or USE_CANONICAL_SCORE_PAIR):
+            pair_cols = score_safe_feature_cols(base_features)
+            score_pair_params = None
+            if n_tuning_trials_meta > 0:
+                try:
+                    score_pair_params = tune_score_pair_model(
+                        base_features,
+                        n_trials=min(12, max(4, n_tuning_trials_meta // 2)),
+                        season=int(test_season),
+                        feature_cols=pair_cols,
+                        fast_mode=fast_tuning or n_tuning_trials_meta <= 8,
+                    )
+                except Exception as e:
+                    print(f"  ⚠ tune_score_pair_model skipped: {e}")
             score_pair_model = MetaScorePairModel(
-                feature_cols=total_feature_cols(base_features),
+                ridge_alpha=(score_pair_params or {}).get("ridge_alpha", 10.0),
+                cb_params=(score_pair_params or {}).get("cb_params"),
+                huber_epsilon=(score_pair_params or {}).get("huber_epsilon", 1.35),
+                feature_cols=(score_pair_params or {}).get("feature_cols") or pair_cols,
                 train_target="absolute",
+                enforce_score_safe_features=True,
             )
             try:
                 score_pair_model.fit(base_features)
-                if total_model is not None and getattr(total_model, "fitted", False):
-                    # Align sigma with standalone total error when available
-                    pass
             except Exception as e:
                 print(f"  ⚠ MetaScorePairModel fit skipped: {e}")
                 score_pair_model = None
 
+            cover_prob_calibrator = None
+            if score_pair_model is not None and getattr(score_pair_model, "fitted", False):
+                try:
+                    from pipeline.shared_forecast import attach_oof_shared_forecasts
+                    base_features = attach_oof_shared_forecasts(
+                        base_features, meta_model, score_pair_model=score_pair_model,
+                    )
+                    from pipeline.score_uncertainty import (
+                        apply_oof_uncertainty_to_score_pair,
+                        fit_cover_calibrator_from_oof,
+                    )
+                    unc = apply_oof_uncertainty_to_score_pair(score_pair_model, base_features)
+                    print(
+                        f"  📐 Score-pair OOF σ_h={unc.get('sigma_home', float('nan')):.2f} "
+                        f"σ_a={unc.get('sigma_away', float('nan')):.2f} "
+                        f"corr={unc.get('residual_corr', float('nan')):.2f} "
+                        f"({unc.get('source')})"
+                    )
+                    cover_prob_calibrator = fit_cover_calibrator_from_oof(
+                        base_features,
+                        sigma_margin=float(getattr(score_pair_model, "_rmse_margin", 12.0)),
+                    )
+                    if getattr(cover_prob_calibrator, "fitted", False):
+                        print(
+                            f"  📐 Cover calibrator fitted on n={cover_prob_calibrator.n_fit} OOF rows"
+                        )
+                except Exception as e:
+                    print(f"  ⚠ OOF score-pair attach skipped: {e}")
+                    cover_prob_calibrator = None
+
         win_model = None
         ats_classifier = None
+        upset_classifier = None
         if train_win_model:
             train_feats = base_features.copy()
             # Task calibration_slice_reuse fix: `static_cal` (the "static
@@ -492,8 +644,21 @@ def run_multi_year_backtest_walkforward(
             # slice — not the same rows used below for the MetaWin/ATS
             # isotonic calibrators.
             calib_feats = _calib_slice("static_spread_calibration")
-            train_raw = meta_model._predict_raw(train_feats)["pred_margin"]
-            calib_raw = meta_model._predict_raw(calib_feats)["pred_margin"]
+            from pipeline.config import USE_CANONICAL_SCORE_PAIR
+            # Prefer OOF pair-derived margins for downstream probability heads.
+            if (
+                USE_CANONICAL_SCORE_PAIR
+                and "sf_fair_margin" in train_feats.columns
+                and train_feats["sf_fair_margin"].notna().sum() >= 30
+            ):
+                train_raw = train_feats["sf_fair_margin"].to_numpy(dtype=float)
+                if "sf_fair_margin" in calib_feats.columns:
+                    calib_raw = calib_feats["sf_fair_margin"].to_numpy(dtype=float)
+                else:
+                    calib_raw = meta_model._predict_raw(calib_feats)["pred_margin"]
+            else:
+                train_raw = meta_model._predict_raw(train_feats)["pred_margin"]
+                calib_raw = meta_model._predict_raw(calib_feats)["pred_margin"]
             # Task 054: replay the rolling calibrator row-by-row over the
             # calib slice (predict, then observe) instead of fitting once on
             # the whole slice and blanket-correcting it with the *final*
@@ -505,18 +670,36 @@ def run_multi_year_backtest_walkforward(
                 if "actual_margin" in calib_feats.columns
                 else np.full(len(calib_feats), np.nan)
             )
-            calib_corrected, static_cal = replay_rolling_spread_calibration(
-                calib_raw, calib_actual,
-                window=max(SPREAD_CALIB_WINDOW, len(calib_feats)),
-                min_samples=min(30, max(10, len(calib_feats) // 3)),
-                mode=spread_calib_mode,
-            )
-            calib_feats["pred_margin"] = calib_corrected
-            # train_feats predates calib_feats and was never used to fit
-            # static_cal, so applying its fully-replayed end state here is
-            # not self-referential (no row corrects itself with its own
-            # future information).
-            train_feats["pred_margin"] = [static_cal.correct(float(p)) for p in train_raw]
+            if USE_CANONICAL_SCORE_PAIR and "sf_fair_margin" in train_feats.columns:
+                # Pair-derived margins already OOF — skip spread calibrator replay
+                # that was fit to the legacy margin residual head.
+                calib_corrected = np.asarray(calib_raw, dtype=float)
+                static_cal = None
+                train_feats["pred_margin"] = np.asarray(train_raw, dtype=float)
+                calib_feats["pred_margin"] = calib_corrected
+            else:
+                calib_corrected, static_cal = replay_rolling_spread_calibration(
+                    calib_raw, calib_actual,
+                    window=max(SPREAD_CALIB_WINDOW, len(calib_feats)),
+                    min_samples=min(30, max(10, len(calib_feats) // 3)),
+                    mode=spread_calib_mode,
+                )
+                calib_feats["pred_margin"] = calib_corrected
+                # train_feats predates calib_feats and was never used to fit
+                # static_cal, so applying its fully-replayed end state here is
+                # not self-referential (no row corrects itself with its own
+                # future information).
+                train_feats["pred_margin"] = [static_cal.correct(float(p)) for p in train_raw]
+
+            # OOF shared-forecast columns only (never in-sample meta predictions).
+            if "sf_fair_margin" not in train_feats.columns:
+                try:
+                    from pipeline.shared_forecast import attach_oof_shared_forecasts
+                    train_feats = attach_oof_shared_forecasts(
+                        train_feats, meta_model, score_pair_model=score_pair_model,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"  ⚠ OOF shared forecast attach skipped: {e}")
 
             win_params = load_cached("meta_win", train_seasons, train_stints) if use_tuning_cache else None
             if win_params is None and n_tuning_trials_meta_win > 0:
@@ -554,30 +737,100 @@ def run_multi_year_backtest_walkforward(
             # completely different set of rows.
             win_calib_df = _calib_slice("metawin_isotonic").copy()
             if not win_calib_df.empty:
-                win_raw = meta_model._predict_raw(win_calib_df)["pred_margin"]
-                win_calib_df["pred_margin"] = [static_cal.correct(float(p)) for p in win_raw]
+                if (
+                    USE_CANONICAL_SCORE_PAIR
+                    and "sf_fair_margin" in win_calib_df.columns
+                    and win_calib_df["sf_fair_margin"].notna().any()
+                ):
+                    win_calib_df["pred_margin"] = win_calib_df["sf_fair_margin"].to_numpy(dtype=float)
+                elif static_cal is not None:
+                    win_raw = meta_model._predict_raw(win_calib_df)["pred_margin"]
+                    win_calib_df["pred_margin"] = [static_cal.correct(float(p)) for p in win_raw]
+                else:
+                    win_calib_df["pred_margin"] = meta_model._predict_raw(win_calib_df)["pred_margin"]
             win_model.fit(
                 train_feats,
                 (train_feats["actual_home"] > train_feats["actual_away"]).astype(int),
                 calib_df=win_calib_df,
             )
 
-            ats_classifier = ATSClassifier(feature_cols=feature_cols)
-            ats_train = train_feats.copy()
-            # Task calibration_slice_reuse fix: ATS isotonic gets its own
-            # disjoint slice, distinct from both `calib_feats`
-            # (static_spread_calibration) and `win_calib_df` (metawin_isotonic)
-            # above.
-            ats_calib = _calib_slice("ats_isotonic").copy()
-            ats_train["pred_margin"] = train_feats["pred_margin"]
-            if not ats_calib.empty:
-                ats_raw = meta_model._predict_raw(ats_calib)["pred_margin"]
-                ats_calib["pred_margin"] = [static_cal.correct(float(p)) for p in ats_raw]
-            if "market_spread" not in ats_train.columns and "closing_spread" in ats_train.columns:
-                ats_train["market_spread"] = ats_train["closing_spread"]
-                if "closing_spread" in ats_calib.columns:
-                    ats_calib["market_spread"] = ats_calib["closing_spread"]
-            ats_classifier.fit(ats_train, calib_df=ats_calib)
+            from pipeline.t60_coverage import t60_betting_data_gate
+            from pipeline.config import ENFORCE_T60_BETTING_GATE
+            t60_gate = t60_betting_data_gate(train_feats)
+            ats_status = {
+                "season": int(test_season),
+                "gate": t60_gate,
+                "status": "ok",
+            }
+            if ENFORCE_T60_BETTING_GATE and not t60_gate["allow_betting_heads"]:
+                print(
+                    f"  ⚠ T-60 betting data gate blocked ATS head: "
+                    f"{t60_gate.get('reason')} "
+                    f"(adequate_seasons={t60_gate['n_adequate_seasons']}/"
+                    f"{t60_gate['min_seasons_required']}, "
+                    f"coverage={t60_gate['overall_decision_coverage']:.3f})"
+                )
+                ats_classifier = None
+                ats_status["status"] = "blocked_research_only"
+                ats_status_records.append(ats_status)
+            else:
+                if not t60_gate["allow_betting_heads"]:
+                    print(
+                        f"  ⚠ T-60 coverage below promote threshold "
+                        f"({t60_gate['n_adequate_seasons']} seasons); "
+                        f"fitting ATS for research only (ENFORCE_T60_BETTING_GATE=False)."
+                    )
+                    ats_status["status"] = "research_only_fitted"
+                ats_classifier = ATSClassifier(feature_cols=feature_cols)
+                ats_train = train_feats.copy()
+                # Task calibration_slice_reuse fix: ATS isotonic gets its own
+                # disjoint slice, distinct from both `calib_feats`
+                # (static_spread_calibration) and `win_calib_df` (metawin_isotonic)
+                # above.
+                ats_calib = _calib_slice("ats_isotonic").copy()
+                ats_train["pred_margin"] = train_feats["pred_margin"]
+                if not ats_calib.empty:
+                    if (
+                        USE_CANONICAL_SCORE_PAIR
+                        and "sf_fair_margin" in ats_calib.columns
+                        and ats_calib["sf_fair_margin"].notna().any()
+                    ):
+                        ats_calib["pred_margin"] = ats_calib["sf_fair_margin"].to_numpy(dtype=float)
+                    elif static_cal is not None:
+                        ats_raw = meta_model._predict_raw(ats_calib)["pred_margin"]
+                        ats_calib["pred_margin"] = [static_cal.correct(float(p)) for p in ats_raw]
+                    else:
+                        ats_calib["pred_margin"] = meta_model._predict_raw(ats_calib)["pred_margin"]
+                if "market_spread" not in ats_train.columns:
+                    if "decision_spread" in ats_train.columns:
+                        ats_train["market_spread"] = ats_train["decision_spread"]
+                        if "decision_spread" in ats_calib.columns:
+                            ats_calib["market_spread"] = ats_calib["decision_spread"]
+                    # Never fall back to closing_spread (evaluation-only / leak).
+                # Drop rows without a usable decision/market line for ATS.
+                for frame_name, frame in (("ats_train", ats_train), ("ats_calib", ats_calib)):
+                    if frame is None or frame.empty:
+                        continue
+                    line = frame["market_spread"] if "market_spread" in frame.columns else None
+                    if line is None and "decision_spread" in frame.columns:
+                        line = frame["decision_spread"]
+                    if line is not None:
+                        keep = line.notna()
+                        if frame_name == "ats_train":
+                            ats_train = frame.loc[keep].copy()
+                        else:
+                            ats_calib = frame.loc[keep].copy()
+                ats_classifier.fit(ats_train, calib_df=ats_calib)
+                ats_status["fitted"] = bool(getattr(ats_classifier, "fitted", False))
+                ats_status_records.append(ats_status)
+
+            if ats_classifier is not None:
+                from pipeline.config import USE_UPSET_CLASSIFIER
+                if USE_UPSET_CLASSIFIER:
+                    upset_classifier = UpsetClassifier()
+                    upset_train = ats_train.copy()
+                    upset_calib = ats_calib.copy() if ats_calib is not None else None
+                    upset_classifier.fit(upset_train, calib_df=upset_calib)
 
         # Reuse post-calibration engines (skip redundant third feature pass)
         full_hier = calib_hier
@@ -600,6 +853,15 @@ def run_multi_year_backtest_walkforward(
             returning_ids = set(full_elo.players.keys()) if full_elo.players else None
             full_hier.offseason_revert()
             full_elo.offseason_revert(returning_player_ids=returning_ids)
+            # New test season: empty prior_rosters → high turnover warm-start
+            from pipeline.trackers import refresh_team_priors_for_season
+            refresh_team_priors_for_season(
+                sim_xppp,
+                elo_tracker=full_elo,
+                pace_tracker=sim_pace,
+                rotation_tracker=sim_rotation,
+                prior_rosters={},
+            )
 
         # Walk-forward thresholds from prior seasons
         edge_thr = 0.0 if not uses_edge_gates() else GOOD_BET_EDGE
@@ -632,22 +894,48 @@ def run_multi_year_backtest_walkforward(
                 season_label=season_lbl,
             )
             if len(calib_ats_df) >= 30:
-                bet_calibrator.fit(
-                    calib_ats_df,
-                    method=CONFIDENCE_CALIB_METHOD,
-                    scope=CONFIDENCE_CALIB_SCOPE,
-                )
-                conf_thr, conf_max = walkforward_confidence_gate(
-                    calib_ats_df,
-                    default_min=MIN_CONFIDENCE_SCORE,
-                    default_max=MAX_CONFIDENCE_SCORE,
-                    bet_calibrator=bet_calibrator if bet_calibrator._fitted else None,
-                )
-                print(
-                    f"  📐 Season-1 calibrator fit on calib split "
-                    f"({len(calib_ats_df)} games, min_confidence={conf_thr:.0f}"
-                    f"{f'-{conf_max:.0f}' if conf_max is not None else ''})"
-                )
+                if str(CONFIDENCE_CALIB_METHOD).lower() == "auto":
+                    bet_calibrator, s1_meta = fit_walkforward_confidence_calibrator(
+                        calib_ats_df,
+                        train_season_label=season_lbl,
+                        test_season_label=f"{int(test_season)-1}-{int(test_season)}",
+                        season_index=0,
+                        weight_center=confidence_weight_center,
+                        method="auto",
+                    )
+                    if s1_meta:
+                        phase2a_rows.append(s1_meta)
+                        confidence_weight_center = shrink_weight_center(
+                            confidence_weight_center,
+                            s1_meta.get("suggested_weights", confidence_weight_center),
+                        )
+                    conf_thr = float(s1_meta.get("train_min_confidence", MIN_CONFIDENCE_SCORE)) if s1_meta else float(MIN_CONFIDENCE_SCORE)
+                    conf_max = s1_meta.get("train_max_confidence", MAX_CONFIDENCE_SCORE) if s1_meta else MAX_CONFIDENCE_SCORE
+                    if conf_max is not None:
+                        conf_max = float(conf_max)
+                    print(
+                        f"  📐 Season-1 auto calibrator "
+                        f"({s1_meta.get('calib_method', 'auto') if s1_meta else 'auto'}; "
+                        f"{len(calib_ats_df)} games, min_confidence={conf_thr:.0f}"
+                        f"{f'-{conf_max:.0f}' if conf_max is not None else ''})"
+                    )
+                else:
+                    bet_calibrator.fit(
+                        calib_ats_df,
+                        method=CONFIDENCE_CALIB_METHOD,
+                        scope=CONFIDENCE_CALIB_SCOPE,
+                    )
+                    conf_thr, conf_max = walkforward_confidence_gate(
+                        calib_ats_df,
+                        default_min=MIN_CONFIDENCE_SCORE,
+                        default_max=MAX_CONFIDENCE_SCORE,
+                        bet_calibrator=bet_calibrator if bet_calibrator._fitted else None,
+                    )
+                    print(
+                        f"  📐 Season-1 calibrator fit on calib split "
+                        f"({len(calib_ats_df)} games, min_confidence={conf_thr:.0f}"
+                        f"{f'-{conf_max:.0f}' if conf_max is not None else ''})"
+                    )
         if i > 0 and compiled_results:
             prior = pd.concat(compiled_results, ignore_index=True)
             prior_year = compiled_results[-1]
@@ -710,12 +998,19 @@ def run_multi_year_backtest_walkforward(
                 )
             ml_calibrator.fit(prior_year, scope=ML_CALIB_SCOPE)
             disagreement_model.fit(prior)
+            if SPREAD_CALIB_ADAPTIVE_WINDOW:
+                active_spread_window = select_spread_calib_window(
+                    prior_year,
+                    candidates=SPREAD_CALIB_WINDOW_CANDIDATES,
+                    default=active_spread_window,
+                )
             ml_tag = f"ml={ML_CALIB_METHOD}" if ml_calibrator._fitted else "ml=raw"
             print(
                 f"  📊 Walk-forward edge={edge_thr}  max_fav_dec={fav_dec:.2f}  "
                 f"ou_edge={ou_thr}  min_confidence={conf_thr:.0f}"
                 f"{f'-{conf_max:.0f}' if conf_max is not None else ''}  "
                 f"min_ml_win%={min_ml_thr:.0f}  "
+                f"spread_window={active_spread_window}  "
                 f"confidence={CONFIDENCE_MODE}/{CONFIDENCE_CALIB_METHOD}  {ml_tag} (fit {train_lbl})"
             )
 
@@ -724,7 +1019,7 @@ def run_multi_year_backtest_walkforward(
             cold_start_fn=meta_model.calibrate_prob,
             variance_aware=variance_aware_winprob,
         )
-        spread_calibrator = SpreadCalibrator(window=SPREAD_CALIB_WINDOW, mode=spread_calib_mode)
+        spread_calibrator = SpreadCalibrator(window=active_spread_window, mode=spread_calib_mode)
 
         results = run_simulation(
             season_df=test_stints,
@@ -753,7 +1048,9 @@ def run_multi_year_backtest_walkforward(
             win_model=win_model,
             total_model=total_model,
             score_pair_model=score_pair_model,
+            cover_prob_calibrator=cover_prob_calibrator,
             ats_classifier=ats_classifier,
+            upset_classifier=upset_classifier,
             vol_tracker=sim_vol,
             elo_calibrator=elo_calibrator if elo_calibrator.fitted else None,
             require_elo_agreement=require_elo_agreement,
@@ -762,6 +1059,7 @@ def run_multi_year_backtest_walkforward(
             max_confidence_threshold=conf_max,
             ml_calibrator=ml_calibrator if ml_calibrator._fitted else None,
             min_ml_win_pct=min_ml_thr,
+            use_venn_abers_filter=use_venn_abers_filter,
         )
 
         print(f"  Season {test_season} produced {len(results)} rows." if results is not None else "  Season returned None.")
@@ -776,7 +1074,10 @@ def run_multi_year_backtest_walkforward(
             results['PHASE2A_INLINE'] = int(
                 CONFIDENCE_MODE == "unified" and i > 0 and len(compiled_results) > 0
             )
-            results['CONFIDENCE_CALIB_METHOD'] = CONFIDENCE_CALIB_METHOD
+            chosen_method = CONFIDENCE_CALIB_METHOD
+            if phase2a_rows and phase2a_rows[-1].get("calib_method"):
+                chosen_method = phase2a_rows[-1]["calib_method"]
+            results['CONFIDENCE_CALIB_METHOD'] = chosen_method
             if bet_calibrator._fitted:
                 results['PHASE2A_LOGISTIC_C'] = float(bet_calibrator.logistic_c)
             compiled_results.append(results)
@@ -819,6 +1120,15 @@ def run_multi_year_backtest_walkforward(
                 score_pair_model.save(STATE_DIR / "score_pair.pkl")
             if ats_classifier is not None and getattr(ats_classifier, "fitted", False):
                 ats_classifier.save(prefix.with_name(prefix.name + "_ats.pkl"))
+            # Persist ATS gate status even when blocked (Finding 6 visibility).
+            if ats_status_records:
+                (STATE_DIR / "ats_status.json").write_text(
+                    json.dumps({"records": ats_status_records}, indent=2, default=str)
+                )
+            if upset_classifier is not None and getattr(upset_classifier, "fitted", False):
+                upset_classifier.save(prefix.with_name(prefix.name + "_upset.pkl"))
+                from pipeline.upset_classifier import default_upset_classifier_path
+                upset_classifier.save(default_upset_classifier_path())
             sim_vol.save_state(prefix.with_name(prefix.name + "_vol.pkl"))
             sim_rotation.save_state(prefix.with_name(prefix.name + "_rotation.pkl"))
             sim_lineup_elo.save_state(prefix.with_name(prefix.name + "_lineup_elo.pkl"))
@@ -874,11 +1184,17 @@ def run_multi_year_backtest_walkforward(
                     "BET_SELECTION_MODE": BET_SELECTION_MODE,
                     "CONFIDENCE_SELECTION_MODE": CONFIDENCE_SELECTION_MODE,
                     "CONFIDENCE_MIN_EDGE": CONFIDENCE_MIN_EDGE,
+                    "MIN_EDGE_BUCKET": MIN_EDGE_BUCKET,
+                    "EDGE_AVOID_BAND": EDGE_AVOID_BAND,
+                    "CONFIDENCE_GATE_MAX_LIFT": CONFIDENCE_GATE_MAX_LIFT,
                     "CALIBRATION_MODE": CALIBRATION_MODE,
                     "STAKE_SIZING_MODE": STAKE_SIZING_MODE,
                     "WIN_PROB_SOURCE": WIN_PROB_SOURCE,
                     "ARTIFACT_SCHEMA_VERSION": ARTIFACT_SCHEMA_VERSION,
                 },
+                "suggested_min_edge": float(MIN_EDGE_BUCKET),
+                "bet_selection_mode": BET_SELECTION_MODE,
+                "avoid_bands": EDGE_AVOID_BAND,
                 "git_hash": git_hash,
                 "seasons": list(final["simulated_season_window"].unique()) if "simulated_season_window" in final.columns else [],
                 "overall_metrics": om,

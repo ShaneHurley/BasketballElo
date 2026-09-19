@@ -33,25 +33,45 @@ def generate_features(
     shot_quality_tracker=None,
     hapm_tracker=None,
     elo_calibrator=None,
+    hierarchical_pace=None,
+    hier_shot_rates=None,
+    minutes_model=None,
 ):
     """
     Generate a feature DataFrame for all games in stints_df, ensuring NO data leakage.
 
     Uses build_game_features() for train/serve parity, then applies post-game updates.
     """
-    df = stints_df.copy()
-    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
-    # Task 015: enforce chronological iteration explicitly by decision
-    # timestamp (game_date) then GAME_ID, regardless of input row order, so
-    # a shuffled `stints_df` produces identical ordered predictions/tracker
-    # state as an already-sorted one.
-    df = df.sort_values(["game_date", "GAME_ID", "stint_id"]).reset_index(drop=True)
-    _per_game_dates = df.drop_duplicates("GAME_ID")["game_date"]
-    assert _per_game_dates.is_monotonic_increasing, (
-        "generate_features: per-game decision timestamps are not monotonic "
-        "nondecreasing after sort — chronological iteration is violated"
-    )
+    # Task 015 + Task 008: coerce mixed ISO/US dates, canonicalize per
+    # GAME_ID, sort, then assert monotonic decision timestamps so a shuffled
+    # `stints_df` produces identical ordered predictions/tracker state.
+    from pipeline.dates import prepare_chronological_stints
+    df = prepare_chronological_stints(stints_df, context="generate_features")
 
+    if hierarchical_pace is None:
+        try:
+            from pipeline.config import USE_HIERARCHICAL_PACE
+            if USE_HIERARCHICAL_PACE:
+                from pipeline.pace_hierarchy import HierarchicalPaceModel
+                hierarchical_pace = HierarchicalPaceModel(baseline=pace_tracker)
+        except Exception:
+            hierarchical_pace = None
+    if hier_shot_rates is None:
+        try:
+            from pipeline.config import USE_HIERARCHICAL_SHOT_ZONES
+            if USE_HIERARCHICAL_SHOT_ZONES:
+                from pipeline.shot_hierarchy import HierarchicalZoneRates
+                hier_shot_rates = HierarchicalZoneRates()
+        except Exception:
+            hier_shot_rates = None
+    if minutes_model is None:
+        try:
+            from pipeline.config import USE_ROTATION_SCENARIOS
+            if USE_ROTATION_SCENARIOS:
+                from pipeline.minutes_hierarchy import HierarchicalMinutesModel
+                minutes_model = HierarchicalMinutesModel()
+        except Exception:
+            minutes_model = None
     rows = []
     last_game_date = {}
     team_game_dates = defaultdict(lambda: deque(maxlen=20))
@@ -102,8 +122,18 @@ def generate_features(
                 season_year = gdate.year
             elif gdate.month > 8 and gdate.year > season_year:
                 returning_ids = set(season_player_ids) if season_player_ids else None
+                prior_rosters = {t: set(ids) for t, ids in team_rosters_seen.items()}
                 hier_engine.offseason_revert()
                 elo_tracker.offseason_revert(returning_player_ids=returning_ids)
+                from pipeline.trackers import refresh_team_priors_for_season
+                refresh_team_priors_for_season(
+                    team_xppp_tracker,
+                    elo_tracker=elo_tracker,
+                    pace_tracker=pace_tracker,
+                    rotation_tracker=rotation_tracker,
+                    prior_rosters=prior_rosters,
+                    lineup_cache=lineup_cache,
+                )
                 season_player_ids = set()
                 season_year = gdate.year
                 season_start_date = gdate
@@ -113,7 +143,7 @@ def generate_features(
                 team_recent_net.clear()
                 opponent_history.clear()
                 if shot_quality_tracker is not None:
-                    for t in list(team_rosters_seen.keys()):
+                    for t in list(prior_rosters.keys()):
                         shot_quality_tracker.on_season_boundary(t, current_season - 1)
 
             if season_start_date is None:
@@ -178,6 +208,9 @@ def generate_features(
             ref_tracker=ref_tracker,
             shot_quality_tracker=shot_quality_tracker,
             hapm_tracker=hapm_tracker,
+            hierarchical_pace=hierarchical_pace,
+            hier_shot_rates=hier_shot_rates,
+            minutes_model=minutes_model,
             last_date=last_game_date,
             team_game_dates=team_game_dates,
             team_recent_net=team_recent_net,
@@ -235,6 +268,9 @@ def generate_features(
                 ref_tracker=ref_tracker,
                 shot_quality_tracker=shot_quality_tracker,
                 hapm_tracker=hapm_tracker,
+                hierarchical_pace=hierarchical_pace,
+                hier_shot_rates=hier_shot_rates,
+                minutes_model=minutes_model,
                 last_game_date=last_game_date,
                 team_game_dates=team_game_dates,
                 team_recent_net=team_recent_net,

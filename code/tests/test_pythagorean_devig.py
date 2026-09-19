@@ -18,6 +18,11 @@ def test_fair_probs_from_home_ml():
     assert p_home > 0.5
     assert abs(p_home + p_away - 1.0) < 1e-9
     assert fair_home_win_prob(-110) == p_home
+    # Two-sided asymmetric quotes must not equal pure negation of home.
+    p2_h, p2_a = fair_probs_from_home_ml(-200, market_ml_away=160)
+    p_neg_h, p_neg_a = fair_probs_from_home_ml(-200)
+    assert abs(p2_a - p_neg_a) > 1e-6
+    assert abs(p2_h + p2_a - 1.0) < 1e-9
 
 
 def test_pythagorean_win_pct_symmetric():

@@ -22,13 +22,20 @@ import hashlib
 
 import numpy as np
 
-# Phase 4B's five single-purpose calibration targets.
+# Phase 4B's five single-purpose calibration targets (legacy backtest wiring).
 CALIBRATION_TARGETS = (
     "engine_margin",
     "final_margin",
     "cover_probability",
     "ml_win_probability",
     "interval_width",
+)
+
+# Roadmap target families: exactly one nested calibrator path each.
+TARGET_FAMILY_CALIBRATION = (
+    "spread_cover",
+    "total_over",
+    "moneyline",
 )
 
 

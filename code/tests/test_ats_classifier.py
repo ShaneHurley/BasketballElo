@@ -41,3 +41,43 @@ def test_fit_predict_cover_prob():
             -3.5,
         )
         assert 0.01 <= p <= 0.99
+
+
+def test_predict_cover_prob_nan_safe():
+    """NaN base features / missing line must not reach LogisticRegression."""
+    df = pd.concat([_mini_df()] * 20, ignore_index=True)
+    # Enough rows + class balance for fit() to succeed (needs >= 50).
+    df.loc[::2, "actual_margin"] = 8
+    df.loc[1::2, "actual_margin"] = -8
+    clf = ATSClassifier(feature_cols=["h_elo_off", "a_elo_off", "elo_margin"])
+    clf.fit(df.iloc[:60], calib_df=df.iloc[60:80])
+    assert clf.fitted
+
+    cases = [
+        # (a) NaN base feature
+        (
+            {"h_elo_off": 1500, "a_elo_off": 1500, "elo_margin": np.nan, "pred_margin": 3},
+            -3.5,
+        ),
+        # (b) no spread keys + NaN market_spread arg
+        (
+            {"h_elo_off": 1500, "a_elo_off": 1500, "elo_margin": 2, "pred_margin": 3},
+            np.nan,
+        ),
+        # (c) NaN uncertainty fields
+        (
+            {
+                "h_elo_off": 1500,
+                "a_elo_off": 1500,
+                "elo_margin": 2,
+                "pred_margin": 3,
+                "h_rating_uncertainty": np.nan,
+                "a_rating_uncertainty": np.nan,
+            },
+            -3.5,
+        ),
+    ]
+    for feat, spread in cases:
+        p = clf.predict_cover_prob(feat, "Home", spread)
+        assert np.isfinite(p)
+        assert 0.01 <= p <= 0.99

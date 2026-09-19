@@ -23,7 +23,24 @@ def variance_aware_edge_threshold(
 
 
 def _active_spread_bets(df):
-    """Rows with a market line and an actionable spread bet under the active mode."""
+    """Rows with a market line and a placed / analysis spread side.
+
+    Prefer explicit ``DIRECTION != Pass`` so post-hoc edge grids that rewrite
+    DIRECTION from EDGE still grade correctly under ``confidence_only`` exports
+    (where ``ACTIONABLE`` is 0 for every row). Fall back to the mode-aware
+    actionable frame when DIRECTION is all Pass.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    m = df
+    if "MARKET_SPREAD" in df.columns:
+        m = df[df["MARKET_SPREAD"].notna()]
+    if m.empty:
+        return m
+    if "DIRECTION" in m.columns:
+        directed = m[m["DIRECTION"].astype(str).isin(("Home", "Away"))]
+        if not directed.empty:
+            return directed.copy()
     from pipeline.bet_selection import spread_bet_frame
     return spread_bet_frame(df)
 
@@ -54,6 +71,8 @@ def add_clv_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add point CLV and (when available) price CLV columns.
 
     Point CLV uses decision vs close home spreads and the bet DIRECTION.
+    Prefers ``DECISION_SPREAD`` (T-60) when present so legacy conflation of
+    MARKET_SPREAD==CLOSING_SPREAD does not force CLV to zero.
     Price/probability CLV is kept in a separate column and never compounded
     with point CLV via a multiplicative return identity (Task 028/038).
     """
@@ -62,11 +81,18 @@ def add_clv_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "CLOSING_SPREAD" not in out.columns:
         out["CLOSING_SPREAD"] = out.get("MARKET_SPREAD", np.nan)
-    if "MARKET_SPREAD" in out.columns and "PRED_SPREAD" in out.columns and "ACTUAL_MARGIN" in out.columns:
-        out["MARKET_RESIDUAL"] = out["ACTUAL_MARGIN"] + out["CLOSING_SPREAD"]
-        out["MODEL_VS_CLOSE"] = out["PRED_SPREAD"] + out["CLOSING_SPREAD"]
-    if all(c in out.columns for c in ("MARKET_SPREAD", "CLOSING_SPREAD")):
-        decision = out["MARKET_SPREAD"]  # decision/T-60 line when wired; legacy alias today
+    if "DECISION_SPREAD" not in out.columns:
+        # Prefer explicit decision/T-60; fall back to MARKET_SPREAD.
+        if "decision_spread" in out.columns:
+            out["DECISION_SPREAD"] = out["decision_spread"]
+        else:
+            out["DECISION_SPREAD"] = out.get("MARKET_SPREAD", np.nan)
+    if all(c in out.columns for c in ("PRED_SPREAD", "ACTUAL_MARGIN")):
+        close_for_resid = out["CLOSING_SPREAD"]
+        out["MARKET_RESIDUAL"] = out["ACTUAL_MARGIN"] + close_for_resid
+        out["MODEL_VS_CLOSE"] = out["PRED_SPREAD"] + close_for_resid
+    if all(c in out.columns for c in ("DECISION_SPREAD", "CLOSING_SPREAD")):
+        decision = out["DECISION_SPREAD"]
         close = out["CLOSING_SPREAD"]
         if "DIRECTION" in out.columns:
             sides = out["DIRECTION"].fillna("Pass")
@@ -77,6 +103,9 @@ def add_clv_columns(df: pd.DataFrame) -> pd.DataFrame:
         point_vals = []
         for dec, clo, side in zip(decision, close, sides):
             if str(side) in ("Pass", "nan") or pd.isna(dec) or pd.isna(clo):
+                point_vals.append(np.nan)
+            elif float(dec) == float(clo):
+                # Identical decision/close is conflation, not true zero CLV.
                 point_vals.append(np.nan)
             else:
                 point_vals.append(bet_side_point_clv(dec, clo, side))
@@ -319,10 +348,61 @@ def walkforward_edge_threshold(
     return best
 
 
+def adaptive_min_confidence(
+    scores,
+    *,
+    default: float | None = None,
+    min_clear_frac: float = 0.08,
+    target_frac: float | None = None,
+    hard_floor: float | None = None,
+) -> float:
+    """Return a confidence gate that never undercuts the production floor.
+
+    Historically this lowered the gate when scores were compressed (causing
+    46 / 60 / 46 season swings). Production policy: keep ``default`` /
+    ``MIN_CONFIDENCE_SCORE`` as a hard floor; only raise toward a high
+    percentile when almost no scores clear the floor (signal to fix weights,
+    not to bet mid-40s).
+    """
+    from pipeline.config import (
+        CONFIDENCE_ADAPTIVE_FLOOR,
+        CONFIDENCE_ADAPTIVE_TARGET_FRAC,
+        CONFIDENCE_GATE_MAX_LIFT,
+        MIN_CONFIDENCE_SCORE,
+    )
+
+    default = float(MIN_CONFIDENCE_SCORE if default is None else default)
+    if not CONFIDENCE_ADAPTIVE_FLOOR:
+        return default
+    target_frac = float(
+        CONFIDENCE_ADAPTIVE_TARGET_FRAC if target_frac is None else target_frac
+    )
+    arr = np.asarray(list(scores), dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 25:
+        return default
+    clear_frac = float((arr >= default).mean())
+    if clear_frac >= min_clear_frac:
+        return default
+    # Scores compressed below floor — do NOT lower the gate; keep floor.
+    # Optional slight raise if the top quantile is above the floor (rare).
+    q = float(np.quantile(arr, max(0.0, min(1.0, 1.0 - target_frac))))
+    ceiling = default + float(CONFIDENCE_GATE_MAX_LIFT)
+    return float(max(default, min(ceiling, q if q >= default else default)))
+
+
+def _clamp_confidence_gate(best_min: float, default_min: float) -> float:
+    from pipeline.config import CONFIDENCE_GATE_MAX_LIFT, MIN_CONFIDENCE_SCORE
+
+    floor = float(max(float(default_min), float(MIN_CONFIDENCE_SCORE)))
+    ceiling = floor + float(CONFIDENCE_GATE_MAX_LIFT)
+    return float(min(ceiling, max(floor, float(best_min))))
+
+
 def walkforward_confidence_gate(
     prior_df,
     thresholds_min=None,
-    thresholds_max: tuple[int | None, ...] = (None, 61, 62, 63, 64, 65),
+    thresholds_max: tuple[int | None, ...] = (None, 61, 62, 63),
     default_min: float | None = None,
     default_max: float | None = None,
     min_bets: int = 80,
@@ -332,27 +412,34 @@ def walkforward_confidence_gate(
     """Walk-forward min/max WIN_PCT band for actionable spread bets."""
     from pipeline.bet_selection import actionable_spread_frame, lean_spread_frame
     from pipeline.bet_confidence import _pick_confidence_band_gated_roi, _scored_ats_bets
-    from pipeline.config import MAX_CONFIDENCE_SCORE, MIN_CONFIDENCE_SCORE
+    from pipeline.config import CONFIDENCE_GATE_MAX_LIFT, MAX_CONFIDENCE_SCORE, MIN_CONFIDENCE_SCORE
 
     if default_min is None:
         default_min = float(MIN_CONFIDENCE_SCORE)
     if default_max is None:
         default_max = MAX_CONFIDENCE_SCORE
+    floor = float(max(float(default_min), float(MIN_CONFIDENCE_SCORE)))
+    ceiling = floor + float(CONFIDENCE_GATE_MAX_LIFT)
     if thresholds_min is None:
-        thresholds_min = (55, 56, 57, 58, 59, 60)
+        # Search only at/above the hard floor up to the lift ceiling.
+        thresholds_min = tuple(
+            t for t in (55, 56, 58, 60, 61, 62, 63) if floor <= t <= ceiling
+        ) or (int(floor),)
 
     if prior_df is None or prior_df.empty:
-        return float(default_min), default_max
+        return floor, default_max
 
     d = actionable_spread_frame(prior_df)
     if d.empty:
         # Early seasons may not have ACTIONABLE populated consistently; fallback to leans.
         d = lean_spread_frame(prior_df)
     if d.empty:
-        return float(default_min), default_max
+        return floor, default_max
 
+    score_pool: list[float] = []
     if bet_calibrator is not None and getattr(bet_calibrator, "_fitted", False):
         scored = _scored_ats_bets(bet_calibrator, d)
+        score_pool = [float(cs) for _y, cs, _p in scored]
         if len(scored) >= min_bets:
             roi, best_min, best_max, best_n = _pick_confidence_band_gated_roi(
                 scored,
@@ -361,29 +448,31 @@ def walkforward_confidence_gate(
                 min_bets=min_bets,
             )
             if best_n >= min_bets and roi > -1e8:
-                best_min = max(float(best_min), float(MIN_CONFIDENCE_SCORE))
+                best_min = _clamp_confidence_gate(best_min, floor)
                 if best_max is not None and default_max is not None:
                     best_max = min(float(best_max), float(default_max))
                 gated_n = sum(
                     1 for _y, cs, _p in scored
                     if cs >= best_min and (best_max is None or cs <= best_max)
                 )
-                if gated_n < min_gated_bets:
-                    return float(MIN_CONFIDENCE_SCORE), default_max
-                return best_min, best_max
+                if gated_n >= min(min_gated_bets, max(40, int(0.15 * len(scored)))):
+                    return best_min, best_max
+                return floor, default_max
 
     # Fallback: min-only on stored WIN_PCT / CONFIDENCE
     best_min = walkforward_min_confidence(
         prior_df,
         thresholds=thresholds_min,
-        default=default_min,
+        default=floor,
         min_bets=min_bets,
         require_positive_ci=False,
         bet_calibrator=None,
     )
-    best_min = max(float(best_min), float(MIN_CONFIDENCE_SCORE))
-    if best_min > 60:
-        best_min = float(MIN_CONFIDENCE_SCORE)
+    if not score_pool:
+        conf_col = "CONFIDENCE" if "CONFIDENCE" in d.columns else "WIN_PCT"
+        if conf_col in d.columns:
+            score_pool = pd.to_numeric(d[conf_col], errors="coerce").dropna().tolist()
+    best_min = _clamp_confidence_gate(best_min, floor)
     return best_min, default_max
 
 
@@ -509,6 +598,10 @@ def compare_selection_strategies(
     min_conf = float(MIN_CONFIDENCE_SCORE if min_conf is None else min_conf)
     confidence_min_edge = float(CONFIDENCE_MIN_EDGE if confidence_min_edge is None else confidence_min_edge)
     df = results_df[results_df["MARKET_SPREAD"].notna()].copy()
+    # confidence_only leaves DIRECTION=Pass on non-actionable rows; rebuild leans for analysis.
+    if "DIRECTION" in df.columns and (df["DIRECTION"].astype(str) == "Pass").mean() > 0.85:
+        from pipeline.bet_selection import spread_side_series
+        df["DIRECTION"] = spread_side_series(df)
     conf_col = "CONFIDENCE" if "CONFIDENCE" in df.columns else "WIN_PCT"
     edge_s = pd.to_numeric(df.get("EDGE"), errors="coerce").abs()
     rows = []
@@ -909,6 +1002,11 @@ def print_accuracy_layers(results_df) -> None:
         - pd.to_numeric(results_df["ACTUAL_MARGIN"], errors="coerce")
     ).abs().mean()
     leans = lean_spread_frame(results_df)
+    if not leans.empty:
+        leans = leans.copy()
+        # Grade on lean side even when confidence_only left DIRECTION=Pass.
+        if "_side" in leans.columns:
+            leans["DIRECTION"] = leans["_side"]
     act = actionable_spread_frame(results_df)
     lean_w = float(ats_win_series(leans).mean()) if len(leans) else float("nan")
     act_w = float(ats_win_series(act).mean()) if len(act) else float("nan")
@@ -932,8 +1030,64 @@ def compute_metrics(results_df: pd.DataFrame, season_col="simulated_season_windo
         df["_total_ae"] = (df["PRED_TOTAL"] - (df["ACTUAL_HOME"] + df["ACTUAL_AWAY"])).abs()
     else:
         df["_total_ae"] = np.nan
+    if "PRED_HOME" in df.columns and "ACTUAL_HOME" in df.columns:
+        df["_home_ae"] = (
+            pd.to_numeric(df["PRED_HOME"], errors="coerce")
+            - pd.to_numeric(df["ACTUAL_HOME"], errors="coerce")
+        ).abs()
+        df["_home_resid"] = (
+            pd.to_numeric(df["ACTUAL_HOME"], errors="coerce")
+            - pd.to_numeric(df["PRED_HOME"], errors="coerce")
+        )
+    else:
+        df["_home_ae"] = np.nan
+        df["_home_resid"] = np.nan
+    if "PRED_AWAY" in df.columns and "ACTUAL_AWAY" in df.columns:
+        df["_away_ae"] = (
+            pd.to_numeric(df["PRED_AWAY"], errors="coerce")
+            - pd.to_numeric(df["ACTUAL_AWAY"], errors="coerce")
+        ).abs()
+        df["_away_resid"] = (
+            pd.to_numeric(df["ACTUAL_AWAY"], errors="coerce")
+            - pd.to_numeric(df["PRED_AWAY"], errors="coerce")
+        )
+    else:
+        df["_away_ae"] = np.nan
+        df["_away_resid"] = np.nan
+    if "_home_ae" in df.columns and "_away_ae" in df.columns:
+        df["_paired_ae"] = 0.5 * (df["_home_ae"] + df["_away_ae"])
+        df["_paired_se"] = 0.5 * (
+            (pd.to_numeric(df.get("PRED_HOME"), errors="coerce")
+             - pd.to_numeric(df.get("ACTUAL_HOME"), errors="coerce")) ** 2
+            + (pd.to_numeric(df.get("PRED_AWAY"), errors="coerce")
+               - pd.to_numeric(df.get("ACTUAL_AWAY"), errors="coerce")) ** 2
+        )
+    else:
+        df["_paired_ae"] = np.nan
+        df["_paired_se"] = np.nan
+    # Algebra consistency: | (H-A) - PRED_SPREAD | and | (H+A) - PRED_TOTAL |
+    if {"PRED_HOME", "PRED_AWAY", "PRED_SPREAD"}.issubset(df.columns):
+        df["_margin_algebra_err"] = (
+            (pd.to_numeric(df["PRED_HOME"], errors="coerce")
+             - pd.to_numeric(df["PRED_AWAY"], errors="coerce"))
+            - pd.to_numeric(df["PRED_SPREAD"], errors="coerce")
+        ).abs()
+    else:
+        df["_margin_algebra_err"] = np.nan
+    if {"PRED_HOME", "PRED_AWAY", "PRED_TOTAL"}.issubset(df.columns):
+        df["_total_algebra_err"] = (
+            (pd.to_numeric(df["PRED_HOME"], errors="coerce")
+             + pd.to_numeric(df["PRED_AWAY"], errors="coerce"))
+            - pd.to_numeric(df["PRED_TOTAL"], errors="coerce")
+        ).abs()
+    else:
+        df["_total_algebra_err"] = np.nan
     home_win = (df["ACTUAL_MARGIN"] > 0).astype(int)
     df["_brier"] = (df.get("WIN_PROB", 0.5) - home_win) ** 2
+    try:
+        from pipeline.calibration_metrics import compute_ece as _ece
+    except ImportError:
+        _ece = None
 
     def _one(g):
         active = g[g["DIRECTION"] != "Pass"]
@@ -949,15 +1103,236 @@ def compute_metrics(results_df: pd.DataFrame, season_col="simulated_season_windo
             ats = roi = np.nan
             n_bets = 0
         raw_mae = g["_raw_spread_ae"].mean() if "_raw_spread_ae" in g.columns else np.nan
+        ece = np.nan
+        if _ece is not None and "WIN_PROB" in g.columns:
+            try:
+                p = pd.to_numeric(g["WIN_PROB"], errors="coerce")
+                y = (g["ACTUAL_MARGIN"] > 0).astype(int)
+                mask = p.notna()
+                if mask.sum() >= 20:
+                    ece = float(_ece(y[mask].values, p[mask].values))
+            except Exception:
+                ece = np.nan
+        market_spread_mae = np.nan
+        market_total_mae = np.nan
+        model_minus_market_spread = np.nan
+        if "MARKET_SPREAD" in g.columns:
+            mkt_spread_err = (
+                -pd.to_numeric(g["MARKET_SPREAD"], errors="coerce")
+                - pd.to_numeric(g["ACTUAL_MARGIN"], errors="coerce")
+            ).abs()
+            market_spread_mae = float(mkt_spread_err.mean())
+            if np.isfinite(market_spread_mae) and np.isfinite(g["_spread_ae"].mean()):
+                model_minus_market_spread = float(g["_spread_ae"].mean() - market_spread_mae)
+        if "MARKET_TOTAL" in g.columns and "ACTUAL_HOME" in g.columns:
+            actual_tot = (
+                pd.to_numeric(g["ACTUAL_HOME"], errors="coerce")
+                + pd.to_numeric(g["ACTUAL_AWAY"], errors="coerce")
+            )
+            market_total_mae = float(
+                (pd.to_numeric(g["MARKET_TOTAL"], errors="coerce") - actual_tot).abs().mean()
+            )
+        calib_slope = calib_intercept = log_loss = np.nan
+        try:
+            from pipeline.calibration_metrics import (
+                compute_log_loss as _ll,
+                calibration_slope_intercept as _csi,
+            )
+            if "WIN_PROB" in g.columns:
+                p = pd.to_numeric(g["WIN_PROB"], errors="coerce")
+                y = (g["ACTUAL_MARGIN"] > 0).astype(int)
+                mask = p.notna()
+                if int(mask.sum()) >= 30:
+                    log_loss = float(_ll(y[mask].values, p[mask].values))
+                    slope_int = _csi(y[mask].values, p[mask].values)
+                    calib_slope = slope_int.get("slope", np.nan)
+                    calib_intercept = slope_int.get("intercept", np.nan)
+        except Exception:
+            pass
+        n_clv = 0
+        if "CLV" in g.columns:
+            n_clv = int(pd.to_numeric(g["CLV"], errors="coerce").notna().sum())
+        interval_coverage = np.nan
+        mean_conf_width = np.nan
+        margin_dispersion_ratio = np.nan
+        if {"CONF_LOWER", "CONF_UPPER", "ACTUAL_MARGIN"}.issubset(g.columns):
+            lo = pd.to_numeric(g["CONF_LOWER"], errors="coerce")
+            hi = pd.to_numeric(g["CONF_UPPER"], errors="coerce")
+            act = pd.to_numeric(g["ACTUAL_MARGIN"], errors="coerce")
+            m = lo.notna() & hi.notna() & act.notna()
+            if int(m.sum()) >= 20:
+                interval_coverage = float(((act[m] >= lo[m]) & (act[m] <= hi[m])).mean())
+                mean_conf_width = float((hi[m] - lo[m]).mean())
+        # Nominal 50/80/95 coverage from quantile columns when present.
+        coverage_50 = coverage_80 = coverage_95 = np.nan
+        home_cov_50 = home_cov_80 = home_cov_95 = np.nan
+        away_cov_50 = away_cov_80 = away_cov_95 = np.nan
+        total_cov_50 = total_cov_80 = total_cov_95 = np.nan
+
+        def _cov_from_cols(act_s, lo_name, hi_name, fallback_lo=None, fallback_hi=None):
+            lo_c = lo_name if lo_name in g.columns else fallback_lo
+            hi_c = hi_name if hi_name in g.columns else fallback_hi
+            if lo_c is None or hi_c is None or lo_c not in g.columns or hi_c not in g.columns:
+                return np.nan, np.nan
+            lo = pd.to_numeric(g[lo_c], errors="coerce")
+            hi = pd.to_numeric(g[hi_c], errors="coerce")
+            mm = lo.notna() & hi.notna() & act_s.notna()
+            if int(mm.sum()) < 20:
+                return np.nan, np.nan
+            cov = float(((act_s[mm] >= lo[mm]) & (act_s[mm] <= hi[mm])).mean())
+            width = float((hi[mm] - lo[mm]).mean())
+            return cov, width
+
+        if "ACTUAL_MARGIN" in g.columns:
+            act = pd.to_numeric(g["ACTUAL_MARGIN"], errors="coerce")
+            for lo_name, hi_name, dest, fb_lo, fb_hi in (
+                ("MARGIN_QLO_50", "MARGIN_QHI_50", "coverage_50", "SPREAD_Q25", "SPREAD_Q75"),
+                ("MARGIN_QLO_80", "MARGIN_QHI_80", "coverage_80", "SPREAD_Q10", "SPREAD_Q90"),
+                ("MARGIN_QLO_95", "MARGIN_QHI_95", "coverage_95", "CONF_LOWER", "CONF_UPPER"),
+            ):
+                # Also accept lowercase aliases from in-memory preds frames.
+                alt = {
+                    "MARGIN_QLO_50": "margin_qlo_50", "MARGIN_QHI_50": "margin_qhi_50",
+                    "MARGIN_QLO_80": "margin_qlo_80", "MARGIN_QHI_80": "margin_qhi_80",
+                    "MARGIN_QLO_95": "margin_qlo_95", "MARGIN_QHI_95": "margin_qhi_95",
+                    "SPREAD_Q25": "spread_q25", "SPREAD_Q75": "spread_q75",
+                    "SPREAD_Q10": "spread_q10", "SPREAD_Q90": "spread_q90",
+                }
+                lo_try = lo_name if lo_name in g.columns else alt.get(lo_name)
+                hi_try = hi_name if hi_name in g.columns else alt.get(hi_name)
+                fb_lo_try = fb_lo if fb_lo in g.columns else alt.get(fb_lo, fb_lo)
+                fb_hi_try = fb_hi if fb_hi in g.columns else alt.get(fb_hi, fb_hi)
+                cov, width = _cov_from_cols(act, lo_try or lo_name, hi_try or hi_name, fb_lo_try, fb_hi_try)
+                if not np.isfinite(cov):
+                    continue
+                if dest == "coverage_50":
+                    coverage_50 = cov
+                elif dest == "coverage_80":
+                    coverage_80 = cov
+                    if not np.isfinite(interval_coverage):
+                        interval_coverage = cov
+                        mean_conf_width = width
+                else:
+                    coverage_95 = cov
+        if "ACTUAL_HOME" in g.columns:
+            ah = pd.to_numeric(g["ACTUAL_HOME"], errors="coerce")
+            home_cov_50, _ = _cov_from_cols(ah, "HOME_QLO_50" if "HOME_QLO_50" in g.columns else "home_qlo_50",
+                                            "HOME_QHI_50" if "HOME_QHI_50" in g.columns else "home_qhi_50")
+            home_cov_80, _ = _cov_from_cols(ah, "HOME_QLO_80" if "HOME_QLO_80" in g.columns else "home_qlo_80",
+                                            "HOME_QHI_80" if "HOME_QHI_80" in g.columns else "home_qhi_80")
+            home_cov_95, _ = _cov_from_cols(ah, "HOME_QLO_95" if "HOME_QLO_95" in g.columns else "home_qlo_95",
+                                            "HOME_QHI_95" if "HOME_QHI_95" in g.columns else "home_qhi_95")
+        if "ACTUAL_AWAY" in g.columns:
+            aa = pd.to_numeric(g["ACTUAL_AWAY"], errors="coerce")
+            away_cov_50, _ = _cov_from_cols(aa, "AWAY_QLO_50" if "AWAY_QLO_50" in g.columns else "away_qlo_50",
+                                            "AWAY_QHI_50" if "AWAY_QHI_50" in g.columns else "away_qhi_50")
+            away_cov_80, _ = _cov_from_cols(aa, "AWAY_QLO_80" if "AWAY_QLO_80" in g.columns else "away_qlo_80",
+                                            "AWAY_QHI_80" if "AWAY_QHI_80" in g.columns else "away_qhi_80")
+            away_cov_95, _ = _cov_from_cols(aa, "AWAY_QLO_95" if "AWAY_QLO_95" in g.columns else "away_qlo_95",
+                                            "AWAY_QHI_95" if "AWAY_QHI_95" in g.columns else "away_qhi_95")
+        if "ACTUAL_TOTAL" in g.columns or (
+            "ACTUAL_HOME" in g.columns and "ACTUAL_AWAY" in g.columns
+        ):
+            if "ACTUAL_TOTAL" in g.columns:
+                at = pd.to_numeric(g["ACTUAL_TOTAL"], errors="coerce")
+            else:
+                at = (
+                    pd.to_numeric(g["ACTUAL_HOME"], errors="coerce")
+                    + pd.to_numeric(g["ACTUAL_AWAY"], errors="coerce")
+                )
+            total_cov_50, _ = _cov_from_cols(at, "TOTAL_QLO_50" if "TOTAL_QLO_50" in g.columns else "total_qlo_50",
+                                             "TOTAL_QHI_50" if "TOTAL_QHI_50" in g.columns else "total_qhi_50")
+            total_cov_80, _ = _cov_from_cols(at, "TOTAL_QLO_80" if "TOTAL_QLO_80" in g.columns else "total_qlo_80",
+                                             "TOTAL_QHI_80" if "TOTAL_QHI_80" in g.columns else "total_qhi_80")
+            total_cov_95, _ = _cov_from_cols(at, "TOTAL_QLO_95" if "TOTAL_QLO_95" in g.columns else "total_qlo_95",
+                                             "TOTAL_QHI_95" if "TOTAL_QHI_95" in g.columns else "total_qhi_95")
+        # Prefer 80% margin coverage as the primary interval_coverage target.
+        if np.isfinite(coverage_80):
+            interval_coverage = coverage_80
+        if "PRED_SPREAD" in g.columns and "MARKET_SPREAD" in g.columns:
+            pred = pd.to_numeric(g["PRED_SPREAD"], errors="coerce")
+            mkt = -pd.to_numeric(g["MARKET_SPREAD"], errors="coerce")
+            mm = pred.notna() & mkt.notna()
+            if int(mm.sum()) >= 20 and float(mkt[mm].abs().mean()) > 1e-9:
+                margin_dispersion_ratio = float(pred[mm].abs().mean() / mkt[mm].abs().mean())
+        home_mae = float(g["_home_ae"].mean()) if "_home_ae" in g.columns else np.nan
+        away_mae = float(g["_away_ae"].mean()) if "_away_ae" in g.columns else np.nan
+        paired_mae = float(g["_paired_ae"].mean()) if "_paired_ae" in g.columns else np.nan
+        paired_rmse = float(np.sqrt(g["_paired_se"].mean())) if "_paired_se" in g.columns else np.nan
+        home_bias = away_bias = resid_corr = np.nan
+        if "_home_resid" in g.columns and "_away_resid" in g.columns:
+            hr = pd.to_numeric(g["_home_resid"], errors="coerce")
+            ar = pd.to_numeric(g["_away_resid"], errors="coerce")
+            rm = hr.notna() & ar.notna()
+            if int(rm.sum()) >= 20:
+                home_bias = float(hr[rm].mean())
+                away_bias = float(ar[rm].mean())
+                if float(hr[rm].std()) > 1e-9 and float(ar[rm].std()) > 1e-9:
+                    resid_corr = float(hr[rm].corr(ar[rm]))
+        market_err_corr = np.nan
+        margin_slope = np.nan
+        within2 = np.nan
+        if "PRED_SPREAD" in g.columns and "MARKET_SPREAD" in g.columns and "ACTUAL_MARGIN" in g.columns:
+            pred = pd.to_numeric(g["PRED_SPREAD"], errors="coerce")
+            mkt = -pd.to_numeric(g["MARKET_SPREAD"], errors="coerce")
+            act = pd.to_numeric(g["ACTUAL_MARGIN"], errors="coerce")
+            edge = pred - mkt
+            realized = act - mkt
+            mm = edge.notna() & realized.notna()
+            if int(mm.sum()) >= 30:
+                market_err_corr = float(edge[mm].corr(realized[mm]))
+            mm2 = pred.notna() & mkt.notna()
+            if int(mm2.sum()) >= 30 and float(mkt[mm2].std()) > 1e-9:
+                margin_slope = float(np.polyfit(mkt[mm2], pred[mm2], 1)[0])
+                within2 = float((pred[mm2].abs() <= 2.0).mean())
+        algebra_ok = np.nan
+        if "_margin_algebra_err" in g.columns and "_total_algebra_err" in g.columns:
+            algebra_ok = float(
+                ((g["_margin_algebra_err"] < 1e-3) & (g["_total_algebra_err"] < 1e-3)).mean()
+            )
         return pd.Series({
             "n_games": int(len(g)),
             "spread_mae": g["_spread_ae"].mean(),
             "raw_spread_mae": raw_mae,
             "total_mae": g["_total_ae"].mean(),
+            "home_mae": home_mae,
+            "away_mae": away_mae,
+            "paired_score_mae": paired_mae,
+            "paired_score_rmse": paired_rmse,
+            "home_resid_bias": home_bias,
+            "away_resid_bias": away_bias,
+            "home_away_resid_corr": resid_corr,
+            "market_spread_mae": market_spread_mae,
+            "market_total_mae": market_total_mae,
+            "model_minus_market_spread_mae": model_minus_market_spread,
+            "margin_dispersion_ratio": margin_dispersion_ratio,
+            "margin_vs_market_slope": margin_slope,
+            "margin_within2_pct": within2,
+            "market_error_corr": market_err_corr,
+            "score_algebra_ok_pct": algebra_ok,
+            "interval_coverage": interval_coverage,
+            "interval_coverage_50": coverage_50,
+            "interval_coverage_80": coverage_80,
+            "interval_coverage_95": coverage_95,
+            "home_coverage_50": home_cov_50,
+            "home_coverage_80": home_cov_80,
+            "home_coverage_95": home_cov_95,
+            "away_coverage_50": away_cov_50,
+            "away_coverage_80": away_cov_80,
+            "away_coverage_95": away_cov_95,
+            "total_coverage_50": total_cov_50,
+            "total_coverage_80": total_cov_80,
+            "total_coverage_95": total_cov_95,
+            "mean_conf_width": mean_conf_width,
             "ats_pct": ats,
             "roi": roi,
             "n_bets": n_bets,
             "brier": g["_brier"].mean(),
+            "ece": ece,
+            "log_loss": log_loss,
+            "calib_slope": calib_slope,
+            "calib_intercept": calib_intercept,
+            "n_finite_clv": n_clv,
         })
 
     rows = []

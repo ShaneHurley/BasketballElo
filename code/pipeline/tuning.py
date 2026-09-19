@@ -1,6 +1,8 @@
 """Hyperparameter tuning."""
 from __future__ import annotations
 
+import os
+
 import optuna
 import numpy as np
 import pandas as pd
@@ -13,7 +15,7 @@ from pipeline.config import (
     TUNING_POINTS_WEIGHT,
     TUNING_XPPP_WEIGHT,
 )
-from pipeline.hierarchical import HierarchicalPossessionEngine
+from pipeline.hierarchical import HierarchicalPossessionEngine, lineup_combos
 from pipeline.model import AdaptiveParameterBounds
 from pipeline.ratings import PlayerRatingTracker
 from pipeline.stint_context import build_stint_context
@@ -22,7 +24,8 @@ from pipeline.utils import _parse_player_string, map_elo_params
 # Original Optuna search bounds (AdaptiveParameterBounds shrinks around running best).
 ELO_PARAM_BOUNDS = {
     "k_off": (0.05, 1.5),
-    "k_def": (0.05, 1.5),
+    # Widened vs calib3h bound-edge hits (k_def often sat at 0.05/1.5).
+    "k_def": (0.02, 2.0),
     "elo_scaling": (200, 1200),
     "home_boost": (0.0001, 0.007),
     "offseason_reversion": (0.1, 0.30),
@@ -31,7 +34,7 @@ ELO_PARAM_BOUNDS = {
     "k_mult_half_life": (10.0, 35.0),
     "rd_floor": (25.0, 50.0),
     "garbage_time_weight": (0.0, 1.0),
-    "clutch_boost": (1.0, 1.6),
+    "clutch_boost": (1.0, 1.85),
     "tov_penalty": (0.7, 1.0),
     "foul_draw_boost": (1.0, 1.3),
     "variance_dampen": (0.5, 1.0),
@@ -101,11 +104,21 @@ def _ensure_season_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _prepare_stint_records(df: pd.DataFrame) -> list[dict]:
-    """Pre-parse player strings and numeric fields once per tuning objective."""
+def _prepare_stint_records(
+    df: pd.DataFrame,
+    *,
+    include_stint_ctx: bool = True,
+    precompute_hier_combos: bool = False,
+) -> list[dict]:
+    """Pre-parse player strings and numeric fields once per tuning objective.
+
+    Hier tuning can skip Elo-only stint context and precompute lineup combos once
+    so every trial reuses the same combo keys (identical math, less CPU).
+    """
     records = []
     cols = df.columns
     has_season = "season" in cols
+    has_game_id = "GAME_ID" in cols
     for row in df.itertuples(index=False):
         poss = float(getattr(row, "possessions", 1) or 1)
         if not (np.isfinite(poss) and poss >= 1):
@@ -127,11 +140,15 @@ def _prepare_stint_records(df: pd.DataFrame) -> list[dict]:
             "start_B": float(getattr(row, "AWAY_SCORE_START", 0) or 0),
             "end_A": float(getattr(row, "HOME_SCORE_END", 0) or 0),
             "end_B": float(getattr(row, "AWAY_SCORE_END", 0) or 0),
-            "stint_ctx": build_stint_context(row),
         }
+        if include_stint_ctx:
+            rec["stint_ctx"] = build_stint_context(row)
+        if precompute_hier_combos:
+            rec["hp_cb"] = lineup_combos(hp)
+            rec["ap_cb"] = lineup_combos(ap)
         if has_season:
             rec["season"] = getattr(row, "season")
-        if hasattr(row, "GAME_ID"):
+        if has_game_id:
             rec["game_id"] = getattr(row, "GAME_ID")
         records.append(rec)
     return records
@@ -271,6 +288,7 @@ def _season_walkforward_mae(
     by_season: dict,
     fold_fn,
 ) -> float:
+    """Expanding-window season CV via independent fold_fn(train, val) calls."""
     fold_maes = []
     if len(seasons) >= 2:
         for i in range(1, len(seasons)):
@@ -304,16 +322,75 @@ def _season_walkforward_mae(
     return float(np.mean(fold_maes))
 
 
+def _season_walkforward_mae_incremental(
+    seasons: list,
+    by_season: dict,
+    make_model,
+    warmup_fn,
+    eval_fn,
+) -> float:
+    """Same CV math as ``_season_walkforward_mae``, but O(seasons) wall work.
+
+    Carries model state forward: warm season 0, then for each later season evaluate
+    (predict+update) so the next fold already has the correct train state — identical
+    to rebuilding and re-warming seasons[:i] from scratch each fold.
+    """
+    fold_maes = []
+    if len(seasons) >= 2:
+        model = make_model()
+        first = by_season.get(seasons[0], [])
+        if first:
+            warmup_fn(model, first)
+        for i in range(1, len(seasons)):
+            train_nonempty = any(by_season.get(s) for s in seasons[:i])
+            val_recs = by_season.get(seasons[i], [])
+            if not train_nonempty or not val_recs:
+                fold_maes.append(TUNING_INVALID_SCORE)
+                # Match from-scratch folds: skipped val season still belongs in later trains.
+                if val_recs:
+                    warmup_fn(model, val_recs)
+                continue
+            fold_maes.append(eval_fn(model, val_recs))
+    elif len(seasons) == 1:
+        recs = by_season.get(seasons[0], [])
+        if len(recs) >= MIN_SINGLE_SEASON_TUNING_RECORDS:
+            split = int(len(recs) * 0.7)
+            train_recs = recs[:split]
+            val_recs = recs[split:]
+            if train_recs and val_recs:
+                model = make_model()
+                warmup_fn(model, train_recs)
+                fold_maes.append(eval_fn(model, val_recs))
+    if not fold_maes:
+        if len(seasons) == 1:
+            n = len(by_season.get(seasons[0], []))
+            print(
+                f"  ⚠ Tuning CV: single season with {n} stints "
+                f"(need ≥{MIN_SINGLE_SEASON_TUNING_RECORDS} for holdout).",
+            )
+        elif len(seasons) < 2:
+            print("  ⚠ Tuning CV: no seasons in training data.")
+        return TUNING_INVALID_SCORE
+    return float(np.mean(fold_maes))
+
+
 def _hier_warmup(engine, records: list[dict]) -> None:
     for rec in records:
-        engine.update(rec["hp"], rec["ap"], rec["home_pts"], rec["away_pts"], rec["poss"])
+        engine.update(
+            rec["hp"], rec["ap"], rec["home_pts"], rec["away_pts"], rec["poss"],
+            cb_off=rec.get("hp_cb"), cb_def=rec.get("ap_cb"),
+        )
 
 
 def _hier_eval_fold(engine, records: list[dict]) -> float:
     yt, yp, xppp_yt, xppp_yp = [], [], [], []
     for rec in records:
         poss = rec["poss"]
-        xh, xa, _, _ = engine.predict_pts(rec["hp"], rec["ap"], poss)
+        # Single predict+update (previously predict_pts then update re-predicted).
+        xh, xa = engine.predict_and_update(
+            rec["hp"], rec["ap"], rec["home_pts"], rec["away_pts"], poss,
+            cb_off=rec.get("hp_cb"), cb_def=rec.get("ap_cb"),
+        )
         xppp_h = rec["home_xpts"] / poss if poss else 0.0
         xppp_a = rec["away_xpts"] / poss if poss else 0.0
         if np.isfinite(xh) and np.isfinite(xa):
@@ -321,7 +398,6 @@ def _hier_eval_fold(engine, records: list[dict]) -> float:
             yp.extend([xh, xa])
         xppp_yt.extend([xppp_h, xppp_a])
         xppp_yp.extend([xh / poss if poss else 0.0, xa / poss if poss else 0.0])
-        engine.update(rec["hp"], rec["ap"], rec["home_pts"], rec["away_pts"], poss)
     if len(yt) <= 10:
         return TUNING_INVALID_SCORE
     points_mae = mean_absolute_error(yt, yp)
@@ -334,20 +410,211 @@ def _hier_eval_fold(engine, records: list[dict]) -> float:
     return _blend_mae(points_mae, xppp_mae)
 
 
-def _run_optuna_study(objective, n_trials, label, bounds_spec=None):
+def _default_optuna_n_jobs() -> int:
+    """Process-parallel trial workers (1 = serial). Override with OPTUNA_N_JOBS."""
+    raw = os.environ.get("OPTUNA_N_JOBS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    cpus = os.cpu_count() or 1
+    # Default: use spare cores for independent trial evaluations.
+    return 1 if cpus <= 2 else min(4, max(1, cpus - 1))
+
+
+_TUNING_WORKER_STATE: dict = {}
+
+
+def _init_tuning_worker(state: dict) -> None:
+    _TUNING_WORKER_STATE.clear()
+    _TUNING_WORKER_STATE.update(state)
+
+
+def _hier_worker_score(params: dict) -> float:
+    total = params["w1"] + params["w2"] + params["w3"] + params["w5"]
+    if total <= 0:
+        return TUNING_INVALID_SCORE
+    seasons = _TUNING_WORKER_STATE["seasons"]
+    by_season = _TUNING_WORKER_STATE["by_season"]
+
+    def make_model():
+        return HierarchicalPossessionEngine(
+            params["w1"] / total, params["w2"] / total,
+            params["w3"] / total, params["w5"] / total,
+            k_off=params["k_off"], k_def=params["k_def"],
+            league_avg_rtg=params["league_rtg"],
+        )
+
+    return _season_walkforward_mae_incremental(
+        seasons, by_season, make_model, _hier_warmup, _hier_eval_fold,
+    )
+
+
+def _elo_worker_score(payload: dict) -> float:
+    params = payload["params"]
+    league_xppp = payload["league_xppp"]
+    seasons = _TUNING_WORKER_STATE["seasons"]
+    by_season = _TUNING_WORKER_STATE["by_season"]
+    config = {
+        "K_OFF": params["k_off"], "K_DEF": params["k_def"],
+        "ELO_SCALING_FACTOR": params["elo_scaling"],
+        "HOME_PPP_BOOST": params["home_boost"],
+        "OFFSEASON_REVERSION": params["offseason_reversion"],
+        "USAGE_FLOOR": params["usage_floor"],
+        "assist_split": params["assist_split"],
+        "k_mult_half_life": params["k_mult_half_life"],
+        "rd_floor": params["rd_floor"],
+        "garbage_time_weight": params["garbage_time_weight"],
+        "clutch_boost": params["clutch_boost"],
+        "tov_penalty": params["tov_penalty"],
+        "foul_draw_boost": params["foul_draw_boost"],
+        "variance_dampen": params["variance_dampen"],
+        "xppp_actual_blend": params["xppp_actual_blend"],
+        "k_def_events": params["k_def_events"],
+        "tov_rate_threshold": params["tov_rate_threshold"],
+        "three_pa_rate_threshold": params["three_pa_rate_threshold"],
+    }
+    home_boost = params["home_boost"]
+    elo_scaling = params["elo_scaling"]
+
+    def make_model():
+        return PlayerRatingTracker(config=config, league_xppp=league_xppp)
+
+    def eval_fn(tracker, val_recs):
+        # MAE-first: do not chase ATS-miss while widening Elo bounds (Phase 0 / anti-roadmap).
+        mae, _ats_miss = _elo_eval_fold(
+            tracker, val_recs, league_xppp, home_boost, elo_scaling,
+        )
+        if mae >= TUNING_INVALID_SCORE:
+            return TUNING_INVALID_SCORE
+        return float(mae)
+
+    return _season_walkforward_mae_incremental(
+        seasons, by_season, make_model, _elo_warmup, eval_fn,
+    )
+
+
+def _print_trial_result(trial, bounds_spec=None, value=None):
+    """Print trial params / MAE.
+
+    Optuna ``study.ask()`` returns a live ``Trial`` without ``.value``;
+    pass ``value=`` after ``study.tell``, or rely on FrozenTrial from callbacks.
+    """
+    print(f"\nTrial {trial.number}:")
+    for key, param in trial.params.items():
+        if isinstance(param, float):
+            print(f"  {key}: {param:.4f}")
+        else:
+            print(f"  {key}: {param}")
+    cv = value if value is not None else getattr(trial, "value", None)
+    if cv is not None:
+        print(f"  CV MAE: {float(cv):.4f}")
+    if bounds_spec and trial.params:
+        at_edge = _params_at_bounds(trial.params, bounds_spec)
+        if at_edge:
+            print(f"  ⚠ at bound edge: {', '.join(at_edge)}")
+
+
+def _run_optuna_ask_tell(
+    n_trials: int,
+    label: str,
+    suggest_fn,
+    worker_fn,
+    worker_state: dict,
+    bounds_spec=None,
+    n_jobs: int | None = None,
+    worker_payload_fn=None,
+):
+    """Full-trial Optuna search with process-parallel workers (same n_trials, full CV)."""
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+    jobs = _default_optuna_n_jobs() if n_jobs is None else max(1, int(n_jobs))
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+
+    if jobs <= 1:
+        def objective(trial):
+            params = suggest_fn(trial)
+            if worker_payload_fn is not None:
+                return worker_fn(worker_payload_fn(params))
+            return worker_fn(params)
+
+        _init_tuning_worker(worker_state)
+
+        def callback(study_, trial):
+            _print_trial_result(trial, bounds_spec)
+
+        study.optimize(
+            objective, n_trials=n_trials, show_progress_bar=True, callbacks=[callback],
+        )
+    else:
+        print(f"  ⚡ Optuna process parallelism: {jobs} workers × {n_trials} trials")
+        completed = 0
+        in_flight = {}
+        import sys
+        import multiprocessing as mp
+
+        # fork is fine on Linux; macOS/Windows need spawn (initializer pickles state once).
+        ctx = mp.get_context("fork" if sys.platform.startswith("linux") else "spawn")
+        with ProcessPoolExecutor(
+            max_workers=jobs,
+            mp_context=ctx,
+            initializer=_init_tuning_worker,
+            initargs=(worker_state,),
+        ) as pool:
+            while completed < n_trials:
+                while len(in_flight) < jobs and completed + len(in_flight) < n_trials:
+                    trial = study.ask()
+                    params = suggest_fn(trial)
+                    payload = worker_payload_fn(params) if worker_payload_fn else params
+                    fut = pool.submit(worker_fn, payload)
+                    in_flight[fut] = trial
+
+                done, _ = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    trial = in_flight.pop(fut)
+                    try:
+                        value = float(fut.result())
+                        study.tell(trial, value)
+                    except Exception as exc:  # noqa: BLE001 — trial failure → invalid score
+                        print(f"  ⚠ Trial {trial.number} failed: {exc}")
+                        value = float(TUNING_INVALID_SCORE)
+                        study.tell(trial, value)
+                    _print_trial_result(trial, bounds_spec, value=value)
+                    completed += 1
+                    print(f"  progress: {completed}/{n_trials}", flush=True)
+
+    print("\n" + "=" * 50)
+    print(f"✅ {label} COMPLETE")
+    print(f"Best CV MAE: {study.best_value:.4f}")
+    if study.best_value >= TUNING_INVALID_SCORE:
+        print(
+            f"  ⚠ WARNING: all trials scored {TUNING_INVALID_SCORE:.0f} — "
+            "tuning had no valid CV folds (check training data / season count)."
+        )
+    print("Best parameters:")
+    for key, value in study.best_params.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+        else:
+            print(f"  {key}: {value}")
+    if bounds_spec:
+        at_edge = _params_at_bounds(study.best_params, bounds_spec)
+        if at_edge:
+            print(f"  ⚠ best params at bound edge: {', '.join(at_edge)}")
+    print("=" * 50)
+    return study
+
+
+def _run_optuna_study(objective, n_trials, label, bounds_spec=None, n_jobs: int | None = None):
+    """Serial/threaded Optuna helper kept for callers that pass a closure objective."""
+    del n_jobs  # Closures are not process-safe; use _run_optuna_ask_tell for parallel.
+
     def callback(study, trial):
-        print(f"\nTrial {trial.number}:")
-        for key, value in trial.params.items():
-            if isinstance(value, float):
-                print(f"  {key}: {value:.4f}")
-            else:
-                print(f"  {key}: {value}")
-        if trial.value is not None:
-            print(f"  CV MAE: {trial.value:.4f}")
-        if bounds_spec and trial.params:
-            at_edge = _params_at_bounds(trial.params, bounds_spec)
-            if at_edge:
-                print(f"  ⚠ at bound edge: {', '.join(at_edge)}")
+        _print_trial_result(trial, bounds_spec)
 
     study = optuna.create_study(
         direction="minimize",
@@ -436,48 +703,26 @@ def tune_elo_tracker(
     Fits ratings on past historical seasons and evaluates strictly on the following season.
     """
     df = _ensure_season_column(stints_df)
-    records = _prepare_stint_records(df)
+    records = _prepare_stint_records(df, include_stint_ctx=True)
     by_season = _group_records_by_season(records)
     seasons = sorted(by_season.keys())
+    worker_state = {"seasons": seasons, "by_season": by_season}
 
-    def objective(trial):
-        params = _suggest_elo_params(trial, bounds)
-        config = {
-            "K_OFF": params["k_off"], "K_DEF": params["k_def"],
-            "ELO_SCALING_FACTOR": params["elo_scaling"],
-            "HOME_PPP_BOOST": params["home_boost"],
-            "OFFSEASON_REVERSION": params["offseason_reversion"],
-            "USAGE_FLOOR": params["usage_floor"],
-            "assist_split": params["assist_split"],
-            "k_mult_half_life": params["k_mult_half_life"],
-            "rd_floor": params["rd_floor"],
-            "garbage_time_weight": params["garbage_time_weight"],
-            "clutch_boost": params["clutch_boost"],
-            "tov_penalty": params["tov_penalty"],
-            "foul_draw_boost": params["foul_draw_boost"],
-            "variance_dampen": params["variance_dampen"],
-            "xppp_actual_blend": params["xppp_actual_blend"],
-            "k_def_events": params["k_def_events"],
-            "tov_rate_threshold": params["tov_rate_threshold"],
-            "three_pa_rate_threshold": params["three_pa_rate_threshold"],
-        }
-        home_boost = params["home_boost"]
-        elo_scaling = params["elo_scaling"]
+    def suggest_fn(trial):
+        return _suggest_elo_params(trial, bounds)
 
-        def fold_fn(train_recs, val_recs):
-            tracker = PlayerRatingTracker(config=config, league_xppp=league_xppp)
-            _elo_warmup(tracker, train_recs)
-            mae, ats_miss = _elo_eval_fold(
-                tracker, val_recs, league_xppp, home_boost, elo_scaling,
-            )
-            if mae >= TUNING_INVALID_SCORE:
-                return TUNING_INVALID_SCORE
-            # ATS-aware blend: lower is better
-            return 0.5 * mae + 0.3 * (ats_miss * 30.0) + 0.2 * (ats_miss * 20.0)
+    def payload_fn(params):
+        return {"params": params, "league_xppp": float(league_xppp)}
 
-        return _season_walkforward_mae(seasons, by_season, fold_fn)
-
-    study = _run_optuna_study(objective, n_trials, "ELO TUNING", ELO_PARAM_BOUNDS)
+    study = _run_optuna_ask_tell(
+        n_trials=n_trials,
+        label="ELO TUNING",
+        suggest_fn=suggest_fn,
+        worker_fn=_elo_worker_score,
+        worker_state=worker_state,
+        bounds_spec=ELO_PARAM_BOUNDS,
+        worker_payload_fn=payload_fn,
+    )
     if study.best_value >= TUNING_INVALID_SCORE:
         print("  ⚠ Elo tuning invalid — using pipeline defaults (not Optuna trial params).")
         return default_elo_config(), study.best_value
@@ -490,29 +735,24 @@ def tune_hierarchical(stints_df, n_trials=30, bounds: AdaptiveParameterBounds = 
     Fits ratings on past historical seasons and evaluates strictly on the following season.
     """
     df = _ensure_season_column(stints_df)
-    records = _prepare_stint_records(df)
+    records = _prepare_stint_records(
+        df, include_stint_ctx=False, precompute_hier_combos=True,
+    )
     by_season = _group_records_by_season(records)
     seasons = sorted(by_season.keys())
+    worker_state = {"seasons": seasons, "by_season": by_season}
 
-    def objective(trial):
-        params = _suggest_hier_params(trial, bounds)
-        total = params["w1"] + params["w2"] + params["w3"] + params["w5"]
-        if total <= 0:
-            return TUNING_INVALID_SCORE
+    def suggest_fn(trial):
+        return _suggest_hier_params(trial, bounds)
 
-        def fold_fn(train_recs, val_recs):
-            engine = HierarchicalPossessionEngine(
-                params["w1"] / total, params["w2"] / total,
-                params["w3"] / total, params["w5"] / total,
-                k_off=params["k_off"], k_def=params["k_def"],
-                league_avg_rtg=params["league_rtg"],
-            )
-            _hier_warmup(engine, train_recs)
-            return _hier_eval_fold(engine, val_recs)
-
-        return _season_walkforward_mae(seasons, by_season, fold_fn)
-
-    study = _run_optuna_study(objective, n_trials, "HIERARCHICAL TUNING", HIER_PARAM_BOUNDS)
+    study = _run_optuna_ask_tell(
+        n_trials=n_trials,
+        label="HIERARCHICAL TUNING",
+        suggest_fn=suggest_fn,
+        worker_fn=_hier_worker_score,
+        worker_state=worker_state,
+        bounds_spec=HIER_PARAM_BOUNDS,
+    )
     if study.best_value >= TUNING_INVALID_SCORE:
         print("  ⚠ Hierarchical tuning invalid — using pipeline defaults.")
         return default_hier_config(), study.best_value

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>T-60 Analysis Dashboard</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <script src="/static/js/vendor/plotly.min.js" defer></script>
+  <script src="/static/js/jsonview.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">T-60 Analysis</div>
+    <p class="tagline">Local research lab · black/grey night mode · localhost only</p>
+    <nav class="tabs" role="tablist">
+      {% for id, label in tabs %}
+      <button type="button" class="tab{% if id == 'all' %} active{% endif %}" data-tab="{{ id }}" role="tab">{{ label }}</button>
+      {% endfor %}
+    </nav>
+  </header>
+
+  <div id="banner" class="banner hidden" role="alert"></div>
+  <div id="toasts" aria-live="polite"></div>
+
+  <main>
+    <section id="panel-all" class="panel active" data-panel="all">
+      <div class="toolbar">
+        <label>Run
+          <select id="run-picker"></select>
+        </label>
+        <button type="button" id="btn-refresh-runs">Refresh</button>
+        <button type="button" id="btn-export-csv">Export filtered CSV</button>
+        <button type="button" id="btn-suite-smoke">Launch suite smoke</button>
+        <button type="button" id="btn-promo-gates">Promotion gates</button>
+      </div>
+      <div id="summary-cards" class="cards"></div>
+      <div id="ats-status-json"></div>
+      <div class="split">
+        <div>
+          <h2>Results</h2>
+          <input id="results-search" type="search" placeholder="Filter rows…" />
+          <div class="table-wrap"><table id="results-table"></table></div>
+          <div class="pager">
+            <button type="button" id="page-prev">Prev</button>
+            <span id="page-info"></span>
+            <button type="button" id="page-next">Next</button>
+          </div>
+        </div>
+        <div>
+          <h2>Artifacts</h2>
+          <ul id="artifact-list" class="file-list"></ul>
+          <h2>Charts</h2>
+          <div id="charts-all" class="chart-grid"></div>
+        </div>
+      </div>
+      <div id="empty-runs" class="empty hidden">
+        <p>No runs found under <code>output/</code>.</p>
+        <button type="button" class="primary" id="btn-empty-smoke">Run suite smoke</button>
+      </div>
+    </section>
+
+    <section id="panel-run" class="panel" data-panel="run">
+      <div class="run-lab-modes" role="tablist" aria-label="Run Lab mode">
+        <button type="button" class="run-mode active" data-run-mode="configure" id="btn-run-configure">Configure</button>
+        <button type="button" class="run-mode" data-run-mode="viewer" id="btn-run-viewer">Viewer</button>
+      </div>
+
+      <div id="run-configure" class="run-mode-panel">
+        <div class="section-card">
+          <h2>Run Lab — full suite (notebook-equivalent)</h2>
+          <p class="muted">Presets fill years/trials; edit anything, then launch. Open Viewer for a live plain-language readout.</p>
+          <div class="toolbar">
+            <label>Preset
+              <select id="suite-preset">
+                <option value="smoke">Smoke (mini / fast)</option>
+                <option value="standard" selected>Standard (4 years)</option>
+                <option value="full">Full (more years / trials)</option>
+                <option value="custom">Custom (keep form)</option>
+              </select>
+            </label>
+          </div>
+          <div id="suite-form" class="form-grid"></div>
+          <div class="run-lab-actions">
+            <button type="button" class="primary" id="btn-launch-suite">Launch full suite</button>
+            <button type="button" id="btn-launch-smoke-lab">Launch smoke only</button>
+          </div>
+        </div>
+        <div class="section-card">
+          <h2>Walk-forward backtest</h2>
+          <div id="backtest-form" class="form-grid"></div>
+          <div class="run-lab-actions">
+            <button type="button" class="primary" id="btn-launch-backtest">Launch backtest</button>
+          </div>
+        </div>
+        <div id="run-cmd-preview" class="json-view muted">Command preview appears here after preset / launch.</div>
+      </div>
+
+      <div id="run-viewer" class="run-mode-panel hidden">
+        <div class="run-viewer">
+          <div class="rv-now">
+            <div class="rv-now-top">
+              <p id="rv-headline" class="rv-headline">No active suite — launch from Configure.</p>
+              <span id="rv-job-id" class="rv-job-id muted"></span>
+            </div>
+            <div class="progress rv-progress"><span id="rv-progress-bar" style="width:0%"></span></div>
+            <p id="rv-progress-label" class="muted rv-progress-label">0%</p>
+          </div>
+
+          <section class="rv-section" aria-label="Pipeline">
+            <h2>Pipeline</h2>
+            <ol id="rv-pipeline" class="pipeline-stepper"></ol>
+          </section>
+
+          <section class="rv-section" aria-label="Season">
+            <h2>Where we are</h2>
+            <div id="rv-season" class="rv-season muted">Waiting for season markers…</div>
+          </section>
+
+          <section class="rv-section" aria-label="Tuners">
+            <h2>How the pieces are doing</h2>
+            <div class="tuner-grid">
+              <div class="tuner-panel" data-tuner="elo">
+                <h3>Player ratings (Elo)</h3>
+                <p class="tuner-gloss muted">These knobs control how player ratings update after each game.</p>
+                <div class="tuner-stats" id="rv-elo-stats">—</div>
+                <div class="chart-box spark" id="rv-elo-spark"></div>
+              </div>
+              <div class="tuner-panel" data-tuner="hier">
+                <h3>Hierarchical engine</h3>
+                <p class="tuner-gloss muted">These knobs blend team and lineup signals before predictions.</p>
+                <div class="tuner-stats" id="rv-hier-stats">—</div>
+                <div class="chart-box spark" id="rv-hier-spark"></div>
+              </div>
+              <div class="tuner-panel" data-tuner="meta">
+                <h3>Margin model</h3>
+                <p class="tuner-gloss muted">This is the main score/margin model trained on past seasons.</p>
+                <div class="tuner-stats" id="rv-meta-stats">—</div>
+                <div class="chart-box spark" id="rv-meta-spark"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="rv-section" aria-label="Timing">
+            <h2>Timing</h2>
+            <div id="rv-timing" class="timing-grid"></div>
+          </section>
+
+          <details class="rv-tech">
+            <summary>Technical details (raw log)</summary>
+            <pre id="rv-log-tail" class="rv-log-tail muted">(log appears while a job is watched)</pre>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-player" class="panel" data-panel="player">
+      <div class="toolbar">
+        <input id="player-search" type="search" placeholder="Search player / team…" />
+        <button type="button" id="btn-players-export">Export players CSV</button>
+        <button type="button" id="btn-player-smoke">Rebuild ratings smoke</button>
+      </div>
+      <p id="player-source" class="muted"></p>
+      <div class="table-wrap"><table id="players-table"></table></div>
+      <div id="player-detail" class="detail"></div>
+    </section>
+
+    <section id="panel-ats" class="panel" data-panel="ats">
+      <div class="toolbar">
+        <button type="button" id="btn-ats-report">Run ATS report (fast)</button>
+        <button type="button" id="btn-edge-policy">Run edge policy grid</button>
+        <button type="button" id="btn-ats-suite">Suite smoke + ATS toggles</button>
+        <button type="button" id="btn-ats-export">Export ATS scorecard</button>
+      </div>
+      <form id="ats-form" class="form-grid">
+        <label>Calibration mode
+          <select name="calibration_mode">
+            <option value="legacy_stack">legacy_stack</option>
+            <option value="simplified">simplified</option>
+            <option value="beta_ats">beta_ats</option>
+          </select>
+        </label>
+        <label>Confidence method
+          <select name="confidence_method">
+            <option value="auto">auto</option>
+            <option value="isotonic">isotonic</option>
+            <option value="platt">platt</option>
+            <option value="logistic_l2">logistic_l2</option>
+          </select>
+        </label>
+        <label>Min abs edge <input name="min_abs_edge" type="number" step="0.1" value="1.5" /></label>
+        <label>T-60 gate enforce
+          <select name="t60_gate">
+            <option value="on">on</option>
+            <option value="off">off (research-only)</option>
+          </select>
+        </label>
+        <label><input name="quick" type="checkbox" checked /> quick / smoke</label>
+      </form>
+      <div id="ats-scorecard" class="cards"></div>
+      <div id="charts-ats" class="chart-grid"></div>
+    </section>
+
+    <section id="panel-ml" class="panel" data-panel="ml">
+      <div class="toolbar">
+        <button type="button" id="btn-ml-report">ML calibration report</button>
+        <button type="button" id="btn-ml-export">Export ML scorecard</button>
+      </div>
+      <form id="ml-form" class="form-grid">
+        <label>WIN_PROB_SOURCE
+          <select name="win_prob_source">
+            <option value="model">model</option>
+            <option value="market_blend">market_blend</option>
+            <option value="upset_blend">upset_blend</option>
+          </select>
+        </label>
+        <label>ML_CALIB_METHOD
+          <select name="ml_calib_method">
+            <option value="none">none</option>
+            <option value="isotonic">isotonic</option>
+            <option value="platt">platt</option>
+            <option value="beta">beta</option>
+          </select>
+        </label>
+        <label>Min EV <input name="min_ev" type="number" step="0.01" value="0.02" /></label>
+      </form>
+      <div id="ml-scorecard" class="cards"></div>
+      <div id="charts-ml" class="chart-grid"></div>
+    </section>
+
+    <section id="panel-totals" class="panel" data-panel="totals">
+      <div class="toolbar">
+        <button type="button" id="btn-totals-report">Totals calibration report</button>
+        <button type="button" id="btn-totals-export">Export totals scorecard</button>
+      </div>
+      <form id="totals-form" class="form-grid">
+        <label>USE_SCORE_PAIR_TOTAL
+          <select name="use_score_pair_total">
+            <option value="1">on</option>
+            <option value="0">off</option>
+          </select>
+        </label>
+        <label>TOTAL_TRAIN_TARGET
+          <select name="total_train_target">
+            <option value="actual">actual</option>
+            <option value="market_residual">market_residual</option>
+          </select>
+        </label>
+        <label>OU_MIN_EDGE <input name="ou_min_edge" type="number" step="0.1" value="2.0" /></label>
+        <label>OU_MIN_PROB <input name="ou_min_prob" type="number" step="0.01" value="0.55" /></label>
+      </form>
+      <div id="totals-scorecard" class="cards"></div>
+      <div id="charts-totals" class="chart-grid"></div>
+    </section>
+
+    <section id="panel-jobs" class="panel" data-panel="jobs">
+      <div class="toolbar">
+        <h2>Job history</h2>
+        <button type="button" id="btn-clear-finished">Clear finished</button>
+      </div>
+      <div id="jobs-full" class="jobs-list"></div>
+    </section>
+  </main>
+
+  <aside id="jobs-drawer" class="jobs-drawer" aria-label="Jobs">
+    <header>
+      <strong>Jobs</strong>
+      <span class="drawer-actions">
+        <button type="button" id="btn-clear-finished-drawer" title="Remove succeeded/failed/cancelled">Clear</button>
+        <button type="button" id="jobs-drawer-toggle">Hide</button>
+      </span>
+    </header>
+    <div id="jobs-live" class="jobs-list"></div>
+  </aside>
+
+  <div id="log-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+      <header>
+        <strong id="log-modal-title">Job log</strong>
+        <button type="button" id="log-modal-close">Close</button>
+      </header>
+      <div id="log-modal-body" class="body"></div>
+    </div>
+  </div>
+</body>
+</html>

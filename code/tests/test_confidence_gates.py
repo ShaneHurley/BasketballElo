@@ -14,11 +14,31 @@ from pipeline.ablation import calibration_ablation_configs
 
 def test_edge_scaled_min_confidence(monkeypatch):
     monkeypatch.setattr(cfg, "CONFIDENCE_EDGE_SCALED", True)
-    assert edge_scaled_min_confidence(3.0, base=55) == 59
-    assert edge_scaled_min_confidence(6.0, base=55) == 57
+    assert edge_scaled_min_confidence(3.0, base=55) == 57
+    assert edge_scaled_min_confidence(6.0, base=55) == 56
     assert edge_scaled_min_confidence(9.0, base=55) == 55
     monkeypatch.setattr(cfg, "CONFIDENCE_EDGE_SCALED", False)
     assert edge_scaled_min_confidence(3.0, base=55) == 55
+
+
+def test_adaptive_min_confidence_never_undercuts_floor(monkeypatch):
+    from pipeline.metrics import adaptive_min_confidence, _clamp_confidence_gate
+
+    monkeypatch.setattr(cfg, "CONFIDENCE_ADAPTIVE_FLOOR", True)
+    monkeypatch.setattr(cfg, "CONFIDENCE_ADAPTIVE_TARGET_FRAC", 0.20)
+    monkeypatch.setattr(cfg, "CONFIDENCE_GATE_MAX_LIFT", 8)
+    monkeypatch.setattr(cfg, "MIN_CONFIDENCE_SCORE", 55)
+    # Compressed scores must NOT lower the gate below 55.
+    scores = list(range(35, 51)) * 3
+    thr = adaptive_min_confidence(scores, default=55)
+    assert thr >= 55
+    # Plenty of scores clear 55 → keep default.
+    scores_hi = list(range(55, 75)) * 2
+    assert adaptive_min_confidence(scores_hi, default=55) == 55
+    # Clamp caps lift.
+    assert _clamp_confidence_gate(70, 55) == 63
+    assert _clamp_confidence_gate(40, 55) == 55
+
 
 
 def test_passes_edge_avoid_band(monkeypatch):
@@ -54,7 +74,7 @@ def test_passes_confidence_actionable_gates(monkeypatch):
         conf_score=58,
         conf_width=20.0,
         min_confidence=55,
-        disagreement_trust=0.8,
+        disagreement_trust=0.6,  # below MIN_DISAGREEMENT_TRUST=0.70
         phantom_injury_flag=False,
         market_spread=-5.0,
     )

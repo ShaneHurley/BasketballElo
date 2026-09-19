@@ -1,12 +1,42 @@
-"""Closing-line residual targets for leak-free meta-model training."""
+"""T-60 decision-line residual targets for leak-free meta-model training.
+
+Closing lines are evaluation-only (CLV). Model training and live
+reconstruction must use the decision (T-60) spread available at bet time.
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
 
+def decision_spread_series(df: pd.DataFrame) -> pd.Series | None:
+    """T-60 decision line (home perspective); falls back to market_spread.
+
+    Never prefers ``closing_spread`` — close is evaluation-only.
+    """
+    if df is None or df.empty:
+        return None
+    if "decision_spread" in df.columns:
+        decision = pd.to_numeric(df["decision_spread"], errors="coerce")
+        # Fill gaps from market_spread (often the same T-60 bet line).
+        if "market_spread" in df.columns:
+            mkt = pd.to_numeric(df["market_spread"], errors="coerce")
+            decision = decision.fillna(mkt)
+    elif "market_spread" in df.columns:
+        decision = pd.to_numeric(df["market_spread"], errors="coerce")
+    else:
+        return None
+    if decision.notna().sum() < max(20, int(0.05 * len(decision))):
+        return None
+    return decision
+
+
 def closing_spread_series(df: pd.DataFrame) -> pd.Series | None:
-    """Pre-tip closing line (home perspective); NaN when unavailable."""
+    """Closing line (home perspective) for CLV / evaluation only.
+
+    Prefer ``closing_spread``; fall back to market only when no close column
+    exists (single-snapshot sources). Do not use this for model targets.
+    """
     if df is None or df.empty:
         return None
     if "closing_spread" in df.columns:
@@ -20,24 +50,28 @@ def closing_spread_series(df: pd.DataFrame) -> pd.Series | None:
     return close
 
 
-def margin_close_residual(actual_margin, closing_spread) -> np.ndarray:
-    """ATS residual vs closing line: actual_margin + closing_spread."""
+def margin_decision_residual(actual_margin, decision_spread) -> np.ndarray:
+    """ATS residual vs T-60 decision line: actual_margin + decision_spread."""
     m = np.asarray(actual_margin, dtype=float)
-    c = np.asarray(closing_spread, dtype=float)
+    d = np.asarray(decision_spread, dtype=float)
     out = m.copy()
-    mask = np.isfinite(c)
-    out[mask] = m[mask] + c[mask]
+    mask = np.isfinite(d)
+    out[mask] = m[mask] + d[mask]
     return out
 
 
-def residual_to_margin(residual, closing_spread) -> np.ndarray:
-    """Map predicted close-residual back to predicted home margin."""
+def residual_to_margin(residual, decision_spread) -> np.ndarray:
+    """Map predicted decision-residual back to predicted home margin."""
     r = np.asarray(residual, dtype=float)
-    c = np.asarray(closing_spread, dtype=float)
+    d = np.asarray(decision_spread, dtype=float)
     out = r.copy()
-    mask = np.isfinite(c)
-    out[mask] = r[mask] - c[mask]
+    mask = np.isfinite(d)
+    out[mask] = r[mask] - d[mask]
     return out
+
+
+# Backward-compatible aliases (close was historically conflated with decision).
+margin_close_residual = margin_decision_residual
 
 
 def market_total_series(df: pd.DataFrame) -> pd.Series | None:
@@ -46,6 +80,8 @@ def market_total_series(df: pd.DataFrame) -> pd.Series | None:
         return None
     if "market_total" in df.columns:
         mkt = pd.to_numeric(df["market_total"], errors="coerce")
+        # Treat legacy 0.0 sentinel as missing (pre-fix substitution).
+        mkt = mkt.where(mkt > 0, np.nan)
     else:
         return None
     if mkt.notna().sum() < max(20, int(0.05 * len(mkt))):
@@ -80,8 +116,16 @@ def valid_market_total_fraction(df: pd.DataFrame) -> float:
     return float(mkt.notna().mean())
 
 
-def valid_closing_fraction(df: pd.DataFrame) -> float:
-    close = closing_spread_series(df)
-    if close is None:
+def valid_decision_fraction(df: pd.DataFrame) -> float:
+    decision = decision_spread_series(df)
+    if decision is None:
         return 0.0
-    return float(close.notna().mean())
+    return float(decision.notna().mean())
+
+
+def valid_closing_fraction(df: pd.DataFrame) -> float:
+    """Fraction of rows with a usable *decision* line (train gate).
+
+    Kept name for call-site compatibility; now checks decision/T-60 coverage.
+    """
+    return valid_decision_fraction(df)

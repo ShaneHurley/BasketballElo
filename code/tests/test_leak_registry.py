@@ -12,6 +12,11 @@ REQUIRED_LEAK_IDS = (
     "clv_definition_bug",
     "push_as_loss_bug",
     "cap_after_profit_bug",
+    "ml_ev_still_negates_away_price",
+    "close_residual_vs_decision_residual",
+    "quote_tip_proxy",
+    "missing_total_zero_sentinel",
+    "unresolved_date_now_fallback",
 )
 
 

@@ -283,6 +283,85 @@ DATE_STATUS_SCHEDULE_MATCHED = "schedule_matched"
 DATE_STATUS_INTERPOLATED = "interpolated"
 DATE_STATUS_UNRESOLVED = "unresolved"
 
+# Seasons with higher interpolated fraction than this are dropped from suite WF
+# unless --allow-interpolated-dates (poisoned 2019–21 schedule coverage).
+MAX_INTERPOLATED_DATE_FRAC = 0.05
+
+
+def season_date_coverage(stints_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-season schedule match / authoritative / interpolate rates from ``date_status``.
+
+    Combined-stats seasons (2025–26+) often have ``authoritative`` CSV dates without
+    an odds-schedule match — those are OK. Only high interpolate / unresolved rates
+    poison walk-forward.
+    """
+    if stints_df is None or stints_df.empty:
+        return pd.DataFrame(columns=[
+            "season", "n_games", "n_matched", "n_authoritative", "n_interpolated",
+            "n_unresolved", "interp_frac", "ok",
+        ])
+    cols = ["season", "GAME_ID"]
+    if "date_status" in stints_df.columns:
+        cols.append("date_status")
+    g = stints_df[cols].drop_duplicates(["season", "GAME_ID"])
+    rows = []
+    for season, sg in g.groupby("season"):
+        n = len(sg)
+        if "date_status" in sg.columns:
+            status = sg["date_status"].fillna(DATE_STATUS_UNRESOLVED).astype(str)
+            n_matched = int((status == DATE_STATUS_SCHEDULE_MATCHED).sum())
+            n_auth = int((status == DATE_STATUS_AUTHORITATIVE).sum())
+            n_interp = int((status == DATE_STATUS_INTERPOLATED).sum())
+            n_unresolved = int((status == DATE_STATUS_UNRESOLVED).sum())
+        else:
+            # No provenance column: if game_date looks real across the season, treat
+            # as authoritative; else unresolved (fail closed).
+            n_matched = 0
+            n_auth = 0
+            n_interp = 0
+            n_unresolved = n
+        frac = n_interp / n if n else 1.0
+        unresolved_frac = n_unresolved / n if n else 1.0
+        n_good = n_matched + n_auth
+        rows.append({
+            "season": int(season) if pd.notna(season) else season,
+            "n_games": n,
+            "n_matched": n_matched,
+            "n_authoritative": n_auth,
+            "n_interpolated": n_interp,
+            "n_unresolved": n_unresolved,
+            "interp_frac": float(frac),
+            "ok": (
+                frac <= float(MAX_INTERPOLATED_DATE_FRAC)
+                and unresolved_frac <= float(MAX_INTERPOLATED_DATE_FRAC)
+                and (n_good > 0 or n == 0)
+            ),
+        })
+    return pd.DataFrame(rows)
+
+
+def filter_stints_by_date_quality(
+    stints_df: pd.DataFrame,
+    *,
+    allow_interpolated: bool = False,
+    max_interp_frac: float | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list]:
+    """Drop seasons with excessive interpolated/unresolved dates (default P0 path).
+
+    Authoritative CSV dates (combined-stats) are kept even when odds-schedule
+    exact-match count is zero.
+
+    Returns ``(filtered_stints, coverage_df, dropped_seasons)``.
+    """
+    cov = season_date_coverage(stints_df)
+    if allow_interpolated or cov.empty:
+        return stints_df, cov, []
+    bad = cov.loc[~cov["ok"], "season"].tolist()
+    if not bad:
+        return stints_df, cov, []
+    keep = stints_df[~stints_df["season"].isin(bad)].copy()
+    return keep, cov, list(bad)
+
 
 @dataclass(frozen=True)
 class DateResolution:
@@ -360,3 +439,89 @@ def to_py_date(gdate, *, game_id=None, prev_date=None):
     if ts is None:
         return None
     return ts.date()
+
+
+def prepare_chronological_stints(
+    stints_df: pd.DataFrame,
+    *,
+    context: str = "stints",
+) -> pd.DataFrame:
+    """Normalize dates, canonicalize per GAME_ID, sort, assert chronology.
+
+    The 2025-26 combined-stats source mixes ISO (``2025-10-21``) and US
+    (``12/17/2025``) date strings. A plain ``pd.to_datetime(..., errors="coerce")``
+    (or leaving the column as object with mixed Timestamp/str) produces NaT or
+    a non-chronological object sort, which then fails the Task 015 monotonic
+    assert in ``generate_features`` / ``run_simulation``.
+
+    Steps:
+      1. Coerce ``game_date`` with ``format="mixed"``.
+      2. One date per ``GAME_ID`` (earliest valid stint date).
+      3. Recover remaining NaT from embedded ``GAME_ID`` dates when possible.
+      4. Drop unresolved games (fail closed — never invent chronology).
+      5. Sort by ``game_date``, ``GAME_ID``, ``stint_id`` and assert
+         per-game dates are monotonic nondecreasing.
+    """
+    if stints_df is None or stints_df.empty:
+        return stints_df
+    if "game_date" not in stints_df.columns or "GAME_ID" not in stints_df.columns:
+        return stints_df
+
+    df = stints_df.copy()
+    df["GAME_ID"] = df["GAME_ID"].astype(str)
+    # format="mixed": parse ISO and M/D/YYYY independently (Task 008).
+    df["game_date"] = pd.to_datetime(df["game_date"], format="mixed", errors="coerce")
+
+    # Canonicalize: every stint of a game shares the earliest valid date.
+    df["game_date"] = df.groupby("GAME_ID", sort=False)["game_date"].transform(
+        lambda s: s.dropna().min() if s.notna().any() else pd.NaT
+    )
+
+    missing = df["game_date"].isna()
+    if missing.any():
+        rec_map = {}
+        for gid in df.loc[missing, "GAME_ID"].unique():
+            ts = coerce_game_date(None, game_id=gid)
+            if ts is not None:
+                rec_map[gid] = ts
+        if rec_map:
+            df.loc[missing, "game_date"] = df.loc[missing, "GAME_ID"].map(rec_map)
+
+    still_bad = df["game_date"].isna()
+    if still_bad.any():
+        bad_games = int(df.loc[still_bad, "GAME_ID"].nunique())
+        n_rows = int(still_bad.sum())
+        print(
+            f"⚠️  {context}: dropping {bad_games} game(s) / {n_rows} row(s) "
+            f"with unresolved game_date (fail closed)"
+        )
+        df = df.loc[~still_bad].copy()
+
+    if df.empty:
+        return df.reset_index(drop=True)
+
+    sort_cols = ["game_date", "GAME_ID"]
+    if "stint_id" in df.columns:
+        sort_cols.append("stint_id")
+    df = df.sort_values(sort_cols).reset_index(drop=True)
+
+    per_game = df.drop_duplicates("GAME_ID")
+    per_game_dates = per_game["game_date"]
+    if not per_game_dates.is_monotonic_increasing:
+        vals = per_game_dates.reset_index(drop=True)
+        gids = per_game["GAME_ID"].reset_index(drop=True)
+        detail = ""
+        for i in range(1, len(vals)):
+            if vals.iloc[i] < vals.iloc[i - 1]:
+                detail = (
+                    f" (first decrease at index {i}: "
+                    f"{gids.iloc[i - 1]}@{vals.iloc[i - 1]} -> "
+                    f"{gids.iloc[i]}@{vals.iloc[i]})"
+                )
+                break
+        raise AssertionError(
+            f"{context}: per-game decision timestamps are not monotonic "
+            f"nondecreasing after sort — chronological iteration is violated"
+            f"{detail}"
+        )
+    return df

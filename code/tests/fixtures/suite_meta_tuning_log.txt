@@ -1,0 +1,43 @@
+Suite run dir: /tmp/fake_run_dash_standard
+Stages: toggles, stints, integrity, engines, calibrators, walkforward, review, policy, persist
+Stage 0 — toggles
+Seasons (start years): [2022, 2023, 2024, 2025]
+Stage 1 — stints
+Stage 2 — integrity / leak gates ...
+Running walk-forward: window=4  trials=12/12/18  rating_history=all prior
+🚀 Walk-forward over 4 seasons: [2022, 2023, 2024, 2025]
+🚀 SIMULATING SEASON 2023-2024
+  ⏳ Tuning Elo tracker on past data...
+Trial 0:
+  CV MAE: 1.9000
+  progress: 1/12
+Trial 11:
+  CV MAE: 1.8640
+  progress: 12/12
+✅ ELO TUNING COMPLETE
+Best CV MAE: 1.8500
+  ⏳ Tuning Hierarchical engine on past data...
+Trial 0:
+  CV MAE: 1.9000
+  progress: 1/12
+Trial 11:
+  CV MAE: 1.8460
+  progress: 12/12
+✅ HIERARCHICAL TUNING COMPLETE
+Best CV MAE: 1.8460
+Building features: 100%|██████████| 1051/1051
+  ⏳ Tuning MetaScoreModel hyperparameters...
+⏳ Tuning margin model (FULL: 18 trials, 3×5 CV, ~54 stack fits)...
+    trial 1: outer fold 1/2 (train=336, val=350, cb_iter=500)...
+[2026-09-14T18:56:40Z] start
+  ✓ trial 1/18 score=5.8012
+[2026-09-14T19:02:08Z] done1
+  ✓ trial 2/18 score=3.4582
+[2026-09-14T19:02:39Z] done2
+  ✓ trial 3/18 score=3.4553
+[2026-09-14T19:03:03Z] done3
+  ✓ trial 4/18 score=3.4555
+[2026-09-14T19:03:34Z] done4
+  ✓ trial 5/18 score=3.4515
+[2026-09-14T19:04:13Z] done5
+    trial 9: outer fold 2/2 (train=686, val=350, cb_iter=300)...

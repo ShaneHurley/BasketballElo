@@ -128,21 +128,9 @@ def test_get_closing_odds_rejects_wrong_opponent_on_same_date():
     assert pd.isna(ml)
 
 
-def test_legacy_pinnacle_loader_still_conflates_bet_line_and_close(tmp_path):
-    """Documents a gap intentionally left open by Tasks 018-029 (LEAK_REGISTRY
-    `close_line_conflation`): the legacy single-snapshot `load_pinnacle_lines`
-    entry used by run_backtest.py/run_daily.py/game_features.py still sets
-    `spread` (the feature the live pipeline treats as MARKET_SPREAD) equal to
-    `closing_spread`, because it only ever stores the LAST Pinnacle snapshot
-    for a game. This is not a false-alarm: real T-60 reconstruction now
-    exists in pipeline/market_snapshots.py (see
-    tests/test_market_snapshots_integration.py), but *rewiring* the legacy
-    feature-building call sites to consume decision_* instead of this
-    closing-only loader is out of scope for Tasks 018-029 (it touches
-    pipeline/features.py / pipeline/model.py / run_backtest.py, i.e.
-    Elo/model/backtest-integration work owned by a later phase — see Task
-    074, Stage 7). This test exists so nobody accidentally believes the gap
-    is closed until that rewiring lands and this assertion is flipped."""
+def test_pinnacle_loader_separates_decision_t60_from_close(tmp_path):
+    """T-60 decision line (last quote ≥60m before close) is the bet line;
+    closing_spread remains the final snapshot — CLV can be nonzero."""
     csv_path = tmp_path / "nba_main_lines.csv"
     csv_path.write_text(
         "team1,team2,game_link,team1_moneyline,team2_moneyline,team1_spread,"
@@ -156,9 +144,14 @@ def test_legacy_pinnacle_loader_still_conflates_bet_line_and_close(tmp_path):
     schedule = pd.DataFrame({"date": [pd.Timestamp("2026-01-01")], "home": ["BOS"], "away": ["MIA"]})
     odds = load_pinnacle_lines(str(csv_path), schedule_df=schedule)
     entry = odds[(pd.Timestamp("2026-01-01").date(), "BOS")]
-    # Known, documented gap (not this phase's to fix): the legacy loader's
-    # bet-line field is still identical to its own closing-line field.
-    assert entry["spread"] == entry["closing_spread"]
+    assert entry["closing_spread"] == pytest.approx(-5.0)
+    assert entry["decision_spread"] == pytest.approx(-4.5)
+    assert entry["spread"] == pytest.approx(-4.5)
+    assert entry["spread"] != entry["closing_spread"]
+    go = get_game_odds(pd.Timestamp("2026-01-01"), "BOS", odds)
+    assert go["spread"] == pytest.approx(-4.5)
+    assert go["closing_spread"] == pytest.approx(-5.0)
+    assert go["decision_spread"] == pytest.approx(-4.5)
 
 
 def test_two_games_same_team_cannot_exchange_prices_via_pinnacle_loader(tmp_path):

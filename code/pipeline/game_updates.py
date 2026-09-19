@@ -40,6 +40,9 @@ def update_trackers_after_game(
     ref_tracker=None,
     shot_quality_tracker=None,
     hapm_tracker=None,
+    hierarchical_pace=None,
+    hier_shot_rates=None,
+    minutes_model=None,
     last_game_date=None,
     team_game_dates=None,
     team_recent_net=None,
@@ -163,6 +166,64 @@ def update_trackers_after_game(
 
     if hasattr(pace_tracker, "update_pace"):
         pace_tracker.update_pace(home, away, home_tot_poss, away_tot_poss)
+    if hierarchical_pace is not None:
+        try:
+            hierarchical_pace.update(home, away, home_tot_poss, away_tot_poss)
+        except Exception:
+            pass
+
+    if hier_shot_rates is not None and gs is not None:
+        try:
+            # Approximate zone updates from team rim/three aggregates when present.
+            for side, team in (("home", home), ("away", away)):
+                rim = float(gs.get(f"{side}_rim_fga", 0) or 0)
+                three = float(gs.get(f"{side}_three_fga", 0) or 0)
+                fga = float(gs.get(f"{side}_fga", 0) or 0)
+                fgm = float(gs.get(f"{side}_fgm", 0) or 0)
+                fg3m = float(gs.get(f"{side}_3pm", 0) or 0)
+                # Distribute makes proportionally when zone-level makes absent.
+                if rim > 0:
+                    made_rim = fgm * (rim / max(fga, 1.0))
+                    for _ in range(int(max(rim, 0))):
+                        hier_shot_rates.update_shot(
+                            zone="restricted",
+                            made=(_ < made_rim),
+                            team=team,
+                        )
+                if three > 0:
+                    for _ in range(int(max(three, 0))):
+                        hier_shot_rates.update_shot(
+                            zone="abovebreak3",
+                            made=(_ < fg3m),
+                            team=team,
+                        )
+        except Exception:
+            pass
+
+    if minutes_model is not None and rotation_tracker is not None:
+        try:
+            # Record active minutes proxies from rotation possession shares.
+            for team, key in ((home, "HOME_players"), (away, "AWAY_players")):
+                poss = defaultdict(float)
+                for _, row in group.iterrows():
+                    p = float(row.get("possessions", 0) or 0)
+                    for pid in _parse_player_string(row.get(key, "")):
+                        poss[str(pid)] += p
+                if not poss:
+                    continue
+                max_p = max(poss.values()) or 1.0
+                outs = 0
+                for pid, p in poss.items():
+                    # Map possessions → rough minutes (48 * share of max rotation).
+                    mins = 36.0 * (p / max_p)
+                    active = mins > 0.5
+                    minutes_model.record_game(pid, mins, active, team=team)
+                    if not active:
+                        outs += 1
+                if hasattr(minutes_model, "record_team_rest_night"):
+                    minutes_model.record_team_rest_night(outs, roster_size=max(len(poss), 1))
+        except Exception:
+            pass
 
     if ref_tracker is not None:
         crew_id = extract_crew_id(group)

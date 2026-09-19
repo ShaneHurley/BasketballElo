@@ -64,7 +64,11 @@ def _spread_side_series(d: pd.DataFrame) -> pd.Series:
 
 def _ats_lean_frame(d: pd.DataFrame) -> pd.DataFrame:
     """ATS outcomes for every lined game using model lean (includes sub-threshold edges)."""
+    if d is None or d.empty or "MARKET_SPREAD" not in d.columns:
+        return _ensure_ats_outcome_columns(pd.DataFrame())
     m = d[d["MARKET_SPREAD"].notna()].copy()
+    if m.empty or "ACTUAL_MARGIN" not in m.columns:
+        return _ensure_ats_outcome_columns(m)
     side = _spread_side_series(m)
     m = m[side != "Pass"].copy()
     m["_side"] = side.loc[m.index]
@@ -372,6 +376,8 @@ def diagnose_loaded_data(stints_df: pd.DataFrame, odds_dict: dict | None = None)
         print("No stint data loaded.")
         return pd.DataFrame()
 
+    from pipeline.market import get_game_odds
+
     df = stints_df.copy()
     df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
     games = (
@@ -390,25 +396,113 @@ def diagnose_loaded_data(stints_df: pd.DataFrame, odds_dict: dict | None = None)
         n_dates = sg["game_date"].dropna().dt.normalize().nunique()
         dates_ok = n_dates > 1
         n_odds = 0
+        n_distinct_clv = 0
         if odds_dict:
             for _, r in sg.iterrows():
                 d = r["game_date"]
                 if pd.isna(d):
                     continue
-                key = (d.date() if hasattr(d, "date") else d, r["home_team"])
-                if key in odds_dict:
+                go = get_game_odds(d, r["home_team"], odds_dict)
+                if pd.notna(go.get("spread")):
                     n_odds += 1
+                dec, clo = go.get("decision_spread"), go.get("closing_spread")
+                if pd.notna(dec) and pd.notna(clo) and float(dec) != float(clo):
+                    n_distinct_clv += 1
         pct_odds = n_odds / n_g if n_g else 0
         flag = "" if dates_ok else "  ⚠️ collapsed dates"
         print(f"\n── Season {season}{flag}")
         print(f"   games={n_g:,}  unique_dates={n_dates}  range={str(dmin)[:10]} → {str(dmax)[:10]}")
-        print(f"   odds matched (home+date key): {n_odds:,} ({pct_odds:.1%})")
+        print(f"   odds matched (via get_game_odds): {n_odds:,} ({pct_odds:.1%})")
+        print(f"   distinct decision≠close (CLV-capable): {n_distinct_clv:,}")
         rows.append({
             "season": season, "n_games": n_g, "n_dates": n_dates,
             "date_min": dmin, "date_max": dmax, "dates_ok": dates_ok,
             "n_odds_matched": n_odds, "pct_odds": pct_odds,
+            "n_distinct_decision_close": n_distinct_clv,
         })
     return pd.DataFrame(rows)
+
+
+def assert_odds_coverage(
+    coverage: pd.DataFrame,
+    *,
+    min_rate: float | None = None,
+    require_any: bool = True,
+) -> None:
+    """Raise SystemExit if odds match rate is too low on seasons with games."""
+    from pipeline.config import MIN_ODDS_MATCH_RATE
+
+    thresh = float(MIN_ODDS_MATCH_RATE if min_rate is None else min_rate)
+    if coverage is None or coverage.empty:
+        if require_any:
+            raise SystemExit("Odds coverage empty — refuse walk-forward")
+        return
+    bad = coverage[coverage["pct_odds"] < thresh]
+    if bad.empty:
+        return
+    detail = ", ".join(
+        f"{int(r.season)}={r.pct_odds:.1%}" for r in bad.itertuples()
+    )
+    raise SystemExit(
+        f"Odds match rate below {thresh:.0%} for seasons: {detail}. "
+        "Fix team/date join (canonicalize_odds_dict) or drop seasons. "
+        "Refuse silent walk-forward with blind market metrics."
+    )
+
+
+def warn_pinnacle_clv_gap(
+    coverage: pd.DataFrame,
+    *,
+    pinnacle_path: str | Path | None,
+    pin_date_min=None,
+    pin_date_max=None,
+) -> list[int]:
+    """Hard-warn when seasons overlap Pinnacle coverage but have 0 decision≠close.
+
+    Returns list of season labels that look covered by Pinnacle yet lack CLV-capable
+    lines (typical cause: suite years excluded 2025–26 while pin file is 2025-only).
+    """
+    if coverage is None or coverage.empty or pinnacle_path is None:
+        return []
+    p = Path(pinnacle_path)
+    if not p.exists():
+        return []
+
+    dmin, dmax = pin_date_min, pin_date_max
+    if dmin is None or dmax is None:
+        try:
+            # Cheap header+timestamp scan for range (avoid full parse cost when provided).
+            pdf = pd.read_csv(p, usecols=["timestamp"])
+            ts = pd.to_datetime(pdf["timestamp"], errors="coerce").dropna()
+            if ts.empty:
+                return []
+            dmin, dmax = ts.min(), ts.max()
+        except Exception:
+            return []
+
+    dmin = pd.Timestamp(dmin)
+    dmax = pd.Timestamp(dmax)
+    flagged: list[int] = []
+    for r in coverage.itertuples():
+        smin = getattr(r, "date_min", None)
+        smax = getattr(r, "date_max", None)
+        if smin is None or smax is None or pd.isna(smin) or pd.isna(smax):
+            continue
+        smin, smax = pd.Timestamp(smin), pd.Timestamp(smax)
+        # Overlap with Pinnacle feed window?
+        if smax < dmin or smin > dmax:
+            continue
+        n_dist = int(getattr(r, "n_distinct_decision_close", 0) or 0)
+        if n_dist == 0:
+            flagged.append(int(r.season))
+    if flagged:
+        print(
+            f"\n  ❌ PINNACLE CLV GAP: seasons {flagged} overlap Pinnacle "
+            f"({str(dmin)[:10]}→{str(dmax)[:10]}) but n_distinct_decision_close=0. "
+            "Include start-year 2025 (2025–26) in --years, or check schedule/pin merge. "
+            "CLV will stay NaN — do not promote ROI/ATS."
+        )
+    return flagged
 
 
 def _setup_plt():
@@ -431,6 +525,32 @@ def _save_or_show(fig, save_dir: Path | None, name: str):
         plt.show()
 
 
+def _autoscaled_ylim(values, *, pad_frac: float = 0.08, floor: float | None = None, ceil: float | None = None):
+    """Data-driven y-limits with fractional padding (avoids hard clips)."""
+    arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
+    if arr.size == 0:
+        return None
+    lo, hi = float(np.nanmin(arr)), float(np.nanmax(arr))
+    if lo == hi:
+        lo, hi = lo - 0.05, hi + 0.05
+    pad = max((hi - lo) * pad_frac, 0.02)
+    y0, y1 = lo - pad, hi + pad
+    if floor is not None:
+        y0 = max(y0, floor)
+    if ceil is not None:
+        y1 = min(y1, ceil)
+    if y0 >= y1:
+        y0, y1 = lo - pad, hi + pad
+    return y0, y1
+
+
+def _autoscaled_lim_pair(xs, ys, *, pad_frac: float = 0.08):
+    """Joint padded limits for reliability-style scatter axes."""
+    xlim = _autoscaled_ylim(xs, pad_frac=pad_frac, floor=0.0, ceil=1.0)
+    ylim = _autoscaled_ylim(ys, pad_frac=pad_frac, floor=0.0, ceil=1.0)
+    return xlim, ylim
+
+
 def _print_gate_attrition(g: pd.DataFrame) -> None:
     """Explain zero actionable ATS bets via successive confidence-gate filters."""
     import pipeline.config as cfg
@@ -438,26 +558,54 @@ def _print_gate_attrition(g: pd.DataFrame) -> None:
     n = len(g)
     if n == 0:
         return
-    edge = pd.to_numeric(g.get("EDGE"), errors="coerce").abs()
+    edge = pd.to_numeric(g["EDGE"] if "EDGE" in g.columns else pd.Series(np.nan, index=g.index), errors="coerce").abs()
     conf = pd.to_numeric(
-        g["CONFIDENCE"] if "CONFIDENCE" in g.columns else g.get("WIN_PCT"),
+        g["CONFIDENCE"] if "CONFIDENCE" in g.columns else (
+            g["WIN_PCT"] if "WIN_PCT" in g.columns else pd.Series(np.nan, index=g.index)
+        ),
         errors="coerce",
     )
     width = pd.to_numeric(
-        g["CONF_WIDTH"] if "CONF_WIDTH" in g.columns else g.get("SPREAD_QUANTILE_WIDTH"),
+        g["CONF_WIDTH"] if "CONF_WIDTH" in g.columns else (
+            g["SPREAD_QUANTILE_WIDTH"] if "SPREAD_QUANTILE_WIDTH" in g.columns
+            else pd.Series(np.nan, index=g.index)
+        ),
         errors="coerce",
     )
-    mkt = pd.to_numeric(g.get("MARKET_SPREAD"), errors="coerce").abs()
-    trust = pd.to_numeric(g.get("DISAGREEMENT_TRUST"), errors="coerce").fillna(1.0)
-    phantom = pd.to_numeric(g.get("PHANTOM_INJURY_FLAG"), errors="coerce").fillna(0).astype(bool)
+    mkt = pd.to_numeric(
+        g["MARKET_SPREAD"] if "MARKET_SPREAD" in g.columns else pd.Series(np.nan, index=g.index),
+        errors="coerce",
+    ).abs()
+    trust = pd.to_numeric(
+        g["DISAGREEMENT_TRUST"] if "DISAGREEMENT_TRUST" in g.columns
+        else pd.Series(1.0, index=g.index),
+        errors="coerce",
+    ).fillna(1.0)
+    phantom = (
+        pd.to_numeric(g["PHANTOM_INJURY_FLAG"], errors="coerce").fillna(0).astype(bool)
+        if "PHANTOM_INJURY_FLAG" in g.columns
+        else pd.Series(False, index=g.index)
+    )
 
     has_odds = mkt.notna()
     pass_edge = has_odds & edge.notna() & (edge >= float(cfg.CONFIDENCE_MIN_EDGE))
     floor = float(cfg.MIN_CONFIDENCE_SCORE)
     if cfg.CONFIDENCE_EDGE_SCALED:
-        need = np.where(edge < 5.0, floor + 4.0, np.where(edge < 8.0, floor + 2.0, floor))
+        need = np.where(edge < 5.0, floor + 2.0, np.where(edge < 8.0, floor + 1.0, floor))
     else:
         need = floor
+    # Prefer per-row MIN_CONFIDENCE_SCORE from the backtest export when present
+    # (adaptive floor may have lowered the season gate below config default).
+    if "MIN_CONFIDENCE_SCORE" in g.columns:
+        row_floor = pd.to_numeric(g["MIN_CONFIDENCE_SCORE"], errors="coerce")
+        if cfg.CONFIDENCE_EDGE_SCALED:
+            need = np.where(
+                edge < 5.0, row_floor + 2.0,
+                np.where(edge < 8.0, row_floor + 1.0, row_floor),
+            )
+        else:
+            need = row_floor.fillna(floor)
+        floor = float(row_floor.dropna().iloc[0]) if row_floor.notna().any() else floor
     pass_conf = pass_edge & conf.notna() & (conf >= need)
     if cfg.MAX_QUANTILE_WIDTH is None:
         pass_width = pass_conf
@@ -470,11 +618,17 @@ def _print_gate_attrition(g: pd.DataFrame) -> None:
         if cfg.SKIP_TIGHT_SPREAD
         else pass_phantom
     )
-    band = cfg.EDGE_AVOID_BAND
-    if band is not None:
-        lo, hi = band
-        in_band = (edge >= float(lo)) & (edge < float(hi))
-        agree = pd.to_numeric(g.get("ELO_META_AGREEMENT"), errors="coerce").fillna(1.0)
+    from pipeline.bet_selection import normalize_edge_avoid_bands
+    bands = normalize_edge_avoid_bands(cfg.EDGE_AVOID_BAND)
+    if bands:
+        in_band = pd.Series(False, index=g.index)
+        for lo, hi in bands:
+            in_band = in_band | ((edge >= float(lo)) & (edge < float(hi)))
+        agree = pd.to_numeric(
+            g["ELO_META_AGREEMENT"] if "ELO_META_AGREEMENT" in g.columns
+            else pd.Series(1.0, index=g.index),
+            errors="coerce",
+        ).fillna(1.0)
         pass_band = pass_tight & (~in_band | (agree >= float(cfg.EDGE_AVOID_BAND_MIN_ELO_AGREE)))
     else:
         pass_band = pass_tight
@@ -491,7 +645,7 @@ def _print_gate_attrition(g: pd.DataFrame) -> None:
         print(f"     + no phantom injury: {int(pass_phantom.sum()):,}")
     if cfg.SKIP_TIGHT_SPREAD:
         print(f"     + |market|>{cfg.TIGHT_SPREAD_MAX}: {int(pass_tight.sum()):,}")
-    print(f"     + edge avoid band {band}: {int(pass_band.sum()):,}")
+    print(f"     + edge avoid band {bands or None}: {int(pass_band.sum()):,}")
     if width.notna().any():
         print(
             f"     conf width: median={float(width.median()):.1f}  "
@@ -603,7 +757,9 @@ def run_backtest_diagnostics(
     for b, v, n in zip(bars, vals, ns):
         if pd.notna(v):
             ax.text(b.get_x() + b.get_width() / 2, v + 0.01, f"{v:.1%}\n(n={int(n)})", ha="center", fontsize=9)
-    ax.set_ylim(0.4, 0.75)
+    ylim = _autoscaled_ylim(list(vals) + [BREAKEVEN], pad_frac=0.12, floor=0.0, ceil=1.0)
+    if ylim:
+        ax.set_ylim(*ylim)
     ax.set_ylabel("ATS win rate")
     ax.set_title("ATS Win Rate by Season (active spread bets)")
     ax.legend()
@@ -777,6 +933,27 @@ def run_backtest_diagnostics(
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ edge curve analysis skipped: {e}")
 
+    # Upset / blowout / favorite-size residual slices
+    try:
+        upset_tbl = favorite_loss_by_spread_bin(df)
+        blow_tbl = blowout_accuracy_table(df)
+        if not upset_tbl.empty:
+            print("\n  Favorite-loss rate by |MARKET_SPREAD| bin:")
+            for _, r in upset_tbl.iterrows():
+                print(
+                    f"    {r['bin']:>8}: n={int(r['n']):4d}  fav_loss={r['fav_loss_rate']:.1%}  "
+                    f"mean_win_prob_fav={r['mean_win_prob_fav']:.3f}  MAE={r['mae']:.2f}"
+                )
+        if not blow_tbl.empty:
+            print("\n  Blowout realization vs predicted P(|m|>=k):")
+            for _, r in blow_tbl.iterrows():
+                print(
+                    f"    |m|>={int(r['threshold'])}: rate={r['actual_rate']:.1%}  "
+                    f"mean_pred_p={r['mean_pred_p']:.3f}  n={int(r['n'])}"
+                )
+    except Exception as e:  # noqa: BLE001
+        print(f"  (upset/blowout diagnostics skipped: {e})")
+
     return summary, edge_tables
 
 
@@ -871,8 +1048,19 @@ def generate_betting_plots(df, save_dir=None):
                 ax.plot(rb["pred_mean"], rb["obs_rate"], "o-", color="#8172B3", lw=1.5)
             ece = compute_ece(y, p)
             ax.set_title(f"{label}  ECE={ece:.3f}" if np.isfinite(ece) else str(label), fontsize=10)
-            ax.set_xlim(0.45, 0.75)
-            ax.set_ylim(0.35, 0.75)
+            if not rb.empty:
+                xlim, ylim = _autoscaled_lim_pair(
+                    list(rb["pred_mean"]) + [0.5],
+                    list(rb["obs_rate"]) + [0.5],
+                    pad_frac=0.1,
+                )
+                if xlim:
+                    ax.set_xlim(*xlim)
+                if ylim:
+                    ax.set_ylim(*ylim)
+            else:
+                ax.set_xlim(0, 1)
+                ax.set_ylim(0, 1)
         for j in range(len(panels), len(axes.flatten())):
             axes.flatten()[j].set_visible(False)
         fig.suptitle("ATS Cover-Prob Reliability by Season", fontweight="bold")
@@ -880,3 +1068,59 @@ def generate_betting_plots(df, save_dir=None):
 
     if save_path:
         print(f"📊 Betting plots saved → {save_path}/")
+
+
+def favorite_loss_by_spread_bin(df: pd.DataFrame, bins=None) -> pd.DataFrame:
+    """Favorite loss rate and MAE by |MARKET_SPREAD| bins."""
+    from pipeline.upset_classifier import favorite_lost_label
+
+    g = _norm_results(df)
+    if g.empty or "MARKET_SPREAD" not in g.columns:
+        return pd.DataFrame()
+    bins = bins or [0, 3, 6, 9, 12, 99]
+    rows = []
+    mkt = pd.to_numeric(g["MARKET_SPREAD"], errors="coerce").abs()
+    g = g.assign(_abs_mkt=mkt).dropna(subset=["_abs_mkt"])
+    g["_bin"] = pd.cut(g["_abs_mkt"], bins=bins, right=False)
+    for label, sub in g.groupby("_bin", observed=True):
+        labs = [favorite_lost_label(r) for _, r in sub.iterrows()]
+        labs = [x for x in labs if x is not None]
+        if len(labs) < 10:
+            continue
+        win_prob = pd.to_numeric(sub.get("WIN_PROB", 0.5), errors="coerce").fillna(0.5)
+        home_fav = pd.to_numeric(sub["MARKET_SPREAD"], errors="coerce") < 0
+        win_prob_fav = np.where(home_fav, win_prob, 1.0 - win_prob)
+        mae = np.nan
+        if "SPREAD_ERR" in sub.columns:
+            mae = float(pd.to_numeric(sub["SPREAD_ERR"], errors="coerce").abs().mean())
+        elif "PRED_SPREAD" in sub.columns and "ACTUAL_MARGIN" in sub.columns:
+            mae = float((sub["PRED_SPREAD"] - sub["ACTUAL_MARGIN"]).abs().mean())
+        rows.append({
+            "bin": str(label),
+            "n": len(labs),
+            "fav_loss_rate": float(np.mean(labs)),
+            "mean_win_prob_fav": float(np.mean(win_prob_fav)),
+            "mae": mae,
+        })
+    return pd.DataFrame(rows)
+
+
+def blowout_accuracy_table(df: pd.DataFrame, thresholds=(10, 15, 20)) -> pd.DataFrame:
+    """Compare realized |margin| rates to predicted blowout probabilities when present."""
+    g = _norm_results(df)
+    if g.empty or "ACTUAL_MARGIN" not in g.columns:
+        return pd.DataFrame()
+    abs_m = pd.to_numeric(g["ACTUAL_MARGIN"], errors="coerce").abs()
+    rows = []
+    for thr in thresholds:
+        col = f"P_BLOWOUT_{int(thr)}"
+        pred = pd.to_numeric(g[col], errors="coerce") if col in g.columns else pd.Series(np.nan, index=g.index)
+        mask = abs_m.notna()
+        actual = (abs_m[mask] >= float(thr)).astype(float)
+        rows.append({
+            "threshold": int(thr),
+            "n": int(mask.sum()),
+            "actual_rate": float(actual.mean()) if mask.any() else np.nan,
+            "mean_pred_p": float(pred[mask].mean()) if pred[mask].notna().any() else np.nan,
+        })
+    return pd.DataFrame(rows)

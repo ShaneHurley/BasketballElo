@@ -1,9 +1,54 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+.venv_*/
+venv/
+ENV/
+
+# Testing / tooling
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+
+# CatBoost / notebooks
 catboost_info/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime state & caches
 state/*.pkl
 state/stints_cache_*.pkl
-.DS_Store
-*.egg-info/
-.ipynb_checkpoints/
+code/state/
+*.pkl
+
+# Large run artifacts (keep out of git)
+output/
+dashboard_data/
+code/.venv_dashboard/
+
+# Extracted notebook scratch (generated)
+code/pipeline/_extract/
+
+# Local docs build
+site/
+
+# Env / secrets
+.env
+.env.*
+*.pem

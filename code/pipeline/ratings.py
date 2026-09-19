@@ -426,6 +426,8 @@ class PlayerRatingTracker:
 
         err_A = act_ppp_A - exp_ppp_A
         err_B = act_ppp_B - exp_ppp_B
+        # O/D residual signs documented in matchup_rating.residual_update_signs:
+        # home O gets +err_A; away D gets credit opposite home scoring error.
 
         self._update_ratings(ids_A, err_A * wt_a, poss, flat_usage_A, side="off", abs_err=abs(err_A))
         self._update_def_split(

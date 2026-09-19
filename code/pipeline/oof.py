@@ -52,6 +52,17 @@ def _check_fold_chronology(groups, train_idx, val_idx):
         )
 
 
+def _fit_with_optional_weight(est, X, y, sample_weight=None):
+    """Call ``est.fit`` with sample_weight when the estimator supports it."""
+    if sample_weight is None:
+        est.fit(X, y)
+        return
+    try:
+        est.fit(X, y, sample_weight=sample_weight)
+    except TypeError:
+        est.fit(X, y)
+
+
 @dataclass
 class ManualOOFStacker:
     """Past-only manual OOF stacking regressor.
@@ -84,13 +95,18 @@ class ManualOOFStacker:
         self.fold_lineage_: list = []
         self.fitted = False
 
-    def fit(self, X, y, groups=None):
+    def fit(self, X, y, groups=None, sample_weight=None):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float)
         n = len(X)
         groups = np.arange(n) if groups is None else np.asarray(groups)
         if len(groups) != n:
             raise ValueError("groups must be the same length as X")
+        sw = None
+        if sample_weight is not None:
+            sw = np.asarray(sample_weight, dtype=float)
+            if len(sw) != n:
+                raise ValueError("sample_weight must be the same length as X")
 
         n_est = len(self.estimators)
         oof = np.full((n, n_est), np.nan, dtype=float)
@@ -112,9 +128,10 @@ class ManualOOFStacker:
                 "n_train": len(train_idx),
                 "n_val": len(val_idx),
             })
+            w_tr = sw[train_idx] if sw is not None else None
             for j, (_, est) in enumerate(self.estimators):
                 fold_est = copy.deepcopy(est)
-                fold_est.fit(X[train_idx], y[train_idx])
+                _fit_with_optional_weight(fold_est, X[train_idx], y[train_idx], w_tr)
                 oof[val_idx, j] = fold_est.predict(X[val_idx])
             covered[val_idx] = True
 
@@ -133,14 +150,15 @@ class ManualOOFStacker:
 
         meta_X = oof[covered]
         meta_y = y[covered]
+        meta_w = sw[covered] if sw is not None else None
         self.final_estimator_ = copy.deepcopy(self.final_estimator)
-        self.final_estimator_.fit(meta_X, meta_y)
+        _fit_with_optional_weight(self.final_estimator_, meta_X, meta_y, meta_w)
 
         overall_max_t = groups.max()
         self.estimators_ = []
         for name, est in self.estimators:
             fitted = copy.deepcopy(est)
-            fitted.fit(X, y)
+            _fit_with_optional_weight(fitted, X, y, sw)
             setattr(fitted, "fit_max_timestamp", overall_max_t)
             self.estimators_.append((name, fitted))
         setattr(self.final_estimator_, "fit_max_timestamp", overall_max_t)

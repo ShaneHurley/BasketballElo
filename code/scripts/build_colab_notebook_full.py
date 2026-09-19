@@ -6,13 +6,19 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent  # BasketballElo/code
 PIPE = ROOT / "pipeline"
-OUT = ROOT / "nba_unified_pipeline_colab.ipynb"
-WORKFLOW_SRC = ROOT / "a new day" / "working code" / "nba_unified_pipeline_colab.ipynb"
+# Write package-local + parent BasketballElo/ + repo-root twins
+BE_ROOT = ROOT.parent  # BasketballElo/
+REPO_ROOT = BE_ROOT.parent
+OUT = BE_ROOT / "nba_unified_pipeline_colab.ipynb"
+OUT_CODE = ROOT / "nba_unified_pipeline_colab.ipynb"
+OUT_REPO = REPO_ROOT / "nba_unified_pipeline_colab.ipynb"
+WORKFLOW_SRC = REPO_ROOT / "a new day" / "working code" / "nba_unified_pipeline_colab.ipynb"
 
 MODULE_ORDER = [
-    "utils", "shot_zones", "ingest", "preprocess", "stints", "dates",
+    "utils", "shot_zones", "ingest", "preprocess", "stints", "dates", "game_results",
+    "data_paths", "stint_loader", "dataset_roles",
     "ratings", "hierarchical", "trackers", "teamstats", "shot_quality",
     "skellam", "market", "feature_utils", "availability", "epm_priors",
     "travel", "fatigue", "team_elo", "lineup_elo", "chemistry",
@@ -23,16 +29,25 @@ MODULE_ORDER = [
     "oof", "model", "metrics", "calibration_metrics", "ml_calibration",
     "game_features", "features",
     "tuning", "tuning_cache", "calibration_policy", "calibration_registry",
-    "ats_classifier",
-    "team_volatility", "simulate", "predict", "backtest", "ablation",
-    "ablation_posthoc", "edge_analysis", "diagnostics", "ml_diagnostics",
-    "confidence_diagnostics", "monitoring", "shap_prune",
+    "ats_classifier", "upset_classifier",
+    "team_volatility", "scenario_mixer", "rotation_scenarios", "minutes_forecast",
+    "injury_reports", "simulate", "predict", "backtest",
+    "ablation", "ablation_posthoc", "edge_analysis", "diagnostics",
+    "ml_diagnostics", "confidence_diagnostics", "validate_plan",
+    "invalid_baseline", "benchmark_lock", "experiment_exports",
+    "monitoring", "shap_prune",
 ]
 
 MARKDOWN_INTRO = """# NBA Spread Prediction — Unified Colab Pipeline
 
 Self-contained, **leak-free** spread model (player ELO + hierarchical possessions).
 Runs end-to-end in Google Colab against your `basketballData` Drive folder.
+
+**Suite alignment:** Local CLI stages live in `BasketballElo/code/run_full_suite.py`
+(stages 0–8). Notebook phases map as: Phase 0↔stage0, Phase 1↔stage1,
+Phase 2↔stages 3–5, Phase 2a–2e↔stage6 review/diagnostics, Phase 3–4↔stage8 persist,
+Phase 5↔daily. Prefer **MAE / ECE / CLV** over ATS when reviewing. Never train from
+quarantined `newest data/` baselines.
 
 Each phase **saves artifacts to disk** and can **reload them** on the next session
 (set `USE_SAVED_ARTIFACTS = False` to always recompute, or `FORCE_RECOMPUTE["<phase>"] = True` for one phase).
@@ -61,22 +76,23 @@ Each phase **saves artifacts to disk** and can **reload them** on the next sessi
 ---
 
 ## Key improvements (2026 pipeline)
+- **Tuning speed (no accuracy cut)** — Hier O(1) 5-man weights, combo cache, fused predict+update, incremental season CV, process-parallel Optuna (`OPTUNA_N_JOBS`)
 - **Specialized markets** — separate WIN vs TOTAL feature matrices; Elo de-emphasized on totals
 - **Score-pair model** — independent home/away score heads → total + margin + σ
 - **Gaussian O/U** — `P(Over|line)` from `N(pred_total, σ²)` with CRPS in diagnostics
 - **Both-sides ML EV** — predict winner, price home *and* away, bet only if +EV else Pass
 - **Multi-window form** — 3/5/10/20/season rolling + nonlinear rest buckets
-- **confidence_only spread selection** — all edges visible; calibrated confidence gates bets
+- **edge_bucket primary selection** — `|edge| ≥ 5.5` is the lean filter; confidence is secondary
+- **Hard confidence floor** — `MIN_CONFIDENCE_SCORE=55`; adaptive gate may raise up to +8, never lower
+- **Avoid bands** — skip `|edge|` in `(3–4)` and `(5.5–6)` without Elo agreement
+- **Phase 2a weight clamps** — `cover_scale` capped so confidence cannot explode/clump
+- **Continuous confidence ranking** — logistic/heuristic score; isotonic only for cover probs/stakes
+- **Tier-2 stake kill** — confidence tier 2 stake multiplier = 0
+- **Favorite ML shrink** — extra shrink when `|spread|≥8` or fav win% ≥ 0.75; ECE gate keeps raw if cal worse
+- **Upset / blowout heads** — `UpsetClassifier` + MetaScore `P(|m|≥10/15/20)` wired into EV/stakes
 - **ATS classifier blend** — always mixed into cover prob before confidence calibration
-- **Actionable gates** — disagreement trust, phantom injury, quantile width (optional tight-spread / edge-band)
-- **Edge-scaled confidence** — small edges need higher confidence (`CONFIDENCE_EDGE_SCALED`)
-- **Defaults tuned for early walks** — `MAX_QUANTILE_WIDTH=28`, `EDGE_AVOID_BAND=None`, `SKIP_TIGHT_SPREAD=False`
 - **Season-1 calibrator** — fit on training calib split before first simulated season
-- **Total-head sanity cap** — skip unstable total refits when CV MAE > `TOTAL_HEAD_CV_SANITY_CAP`
-- **Phase 2a** unified confidence tuning (prior-year only, gated ROI objective)
 - **Selection comparison** — `compare_selection_strategies()` after backtest (hybrid, edge-scaled, edge-only)
-- **ML calibration** (`ml_calibration`) + `MIN_ML_WIN_PCT` gate separate from spread
-- **O/U** Gaussian prob gate + edge (`OU_MIN_EDGE`, `OU_MIN_PROB`)
 - **Artifact schema validation** — stale `backtest_results.csv` detected on reload
 - All modules inlined below — **no external repo required** on Colab"""
 
@@ -124,30 +140,108 @@ def _strip_pipeline_imports(src: str) -> str:
                         out.append(f"{alias} = {name}")
                     # bare names already defined in inlined config cell
             continue
+        # Multi-line: from pipeline.config import (\n  FOO,\n)
+        if stripped.startswith("from pipeline.config import"):
+            continue
         if stripped.startswith("from pipeline import "):
             # e.g. "from pipeline import config as cfg" — drop; cfg.X rewritten below
             continue
         if stripped.startswith("from pipeline.") or stripped.startswith("import pipeline"):
             continue
+        # Bare config-module attrs only (cfg.FOO). Do NOT rewrite cfg.get(...) —
+        # local/param dicts are often named cfg (feature_utils, predict).
         line = re.sub(r"(?<![.\w])cfg\.([A-Z_][A-Z0-9_]*)", r"\1", line)
+        # getattr(cfg, "KEY", default) → globals().get("KEY", default)
+        line = re.sub(
+            r'getattr\(\s*cfg\s*,\s*"([A-Z_][A-Z0-9_]*)"\s*,\s*([^)]+)\)',
+            r'globals().get("\1", \2)',
+            line,
+        )
+        # hasattr(cfg, key) / getattr(cfg, key) / setattr(cfg, key, val)
+        # when key is a variable — notebook config lives in globals().
+        line = re.sub(r"hasattr\(\s*cfg\s*,\s*(\w+)\s*\)", r"(\1 in globals())", line)
+        line = re.sub(r"getattr\(\s*cfg\s*,\s*(\w+)\s*\)", r"globals()[\1]", line)
+        line = re.sub(
+            r"setattr\(\s*cfg\s*,\s*(\w+)\s*,\s*([^)]+)\)",
+            r"globals().__setitem__(\1, \2)",
+            line,
+        )
         out.append(line)
     text = "\n".join(out)
-    # cfg.get("KEY", default) → globals().get("KEY", default) after stripping config import
-    text = re.sub(
-        r'(?<![.\w])cfg\.get\(\s*"([A-Z_][A-Z0-9_]*)"\s*,\s*([^)]+)\)',
-        r'globals().get("\1", \2)',
-        text,
-    )
-    text = re.sub(
-        r'(?<![.\w])cfg\.get\(\s*"([A-Z_][A-Z0-9_]*)"\s*\)',
-        r'globals().get("\1")',
-        text,
-    )
+    # Alias used by artifacts.full_config_snapshot
+    text = re.sub(r"(?<![.\w])_cfg\b", "globals()", text)
+    # dir(_cfg) already becomes dir(globals()); fix value fetch pattern left as
+    # getattr(globals(), name) which is wrong — normalize common leftover.
+    text = text.replace("getattr(globals(), name)", "globals()[name]")
+    text = text.replace("for name in dir(globals()):", "for name in list(globals()):")
     return _sanitize_inlined_source(text)
+
+
+def _strip_main_blocks(text: str) -> str:
+    """Drop ``if __name__ == "__main__":`` blocks — notebooks set __name__ to __main__."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    skipping = False
+    for line in lines:
+        if not skipping and re.match(r"""^if\s+__name__\s*==\s*['\"]__main__['\"]\s*:""", line):
+            skipping = True
+            continue
+        if skipping:
+            if line.strip() == "":
+                continue
+            if line[:1] in (" ", "\t"):
+                continue
+            skipping = False
+        out.append(line)
+    return "".join(out)
+
+
+def _remove_empty_try_except(text: str) -> str:
+    """Remove try/except whose try body was emptied by stripping pipeline imports.
+
+    Pattern left behind::
+        try:
+        except Exception:
+            return None
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = re.match(r"^([ \t]*)try:\s*\n?$", lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        indent = m.group(1)
+        j = i + 1
+        # Skip blank lines inside try
+        while j < n and lines[j].strip() == "":
+            j += 1
+        # Empty try → next non-blank is except at same indent
+        if j < n and re.match(rf"^{re.escape(indent)}except\b.*:\s*\n?$", lines[j]):
+            j += 1
+            # Skip except body (more-indented lines) and blanks
+            while j < n:
+                if lines[j].strip() == "":
+                    j += 1
+                    continue
+                if lines[j].startswith(indent + " ") or lines[j].startswith(indent + "\t"):
+                    j += 1
+                    continue
+                break
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
 
 
 def _sanitize_inlined_source(text: str) -> str:
     """Remove empty try/except blocks left when config imports are stripped."""
+    text = _strip_main_blocks(text)
+    text = _remove_empty_try_except(text)
     text = re.sub(
         r"try:\s*\nexcept ImportError:\s*\n(?:\s+pass\s*\n)?",
         "",
@@ -158,6 +252,8 @@ def _sanitize_inlined_source(text: str) -> str:
         "",
         text,
     )
+    # Second pass after regex cleanup
+    text = _remove_empty_try_except(text)
     return text
 
 
@@ -335,6 +431,7 @@ def ensure_results() -> pd.DataFrame:
         empty = results is None or results.empty
     except NameError:
         empty = True
+        results = pd.DataFrame()
     if empty and use_saved_artifacts("2") and ARTIFACTS["backtest"].exists():
         results = load_results_csv()
         if not results.empty and "STAKE_MODERATE" not in results.columns:
@@ -346,7 +443,10 @@ def ensure_results() -> pd.DataFrame:
                 print(f"   · {r}")
             if is_backtest_stale(results):
                 print("   → Set USE_SAVED_ARTIFACTS=False and re-run Phase 2")
-    return results
+    try:
+        return results
+    except NameError:
+        return pd.DataFrame()
 
 
 print("Checkpoint dir:", CHECKPOINT_DIR)
@@ -357,16 +457,22 @@ print("Force recompute:", {k: v for k, v in FORCE_RECOMPUTE.items() if v} or "(n
 def _workflow_phase_cells() -> list[dict]:
     """Ordered Phase 0–4 workflow with per-phase save/load."""
     return [
-        _md("---\n\n## Phase 0 — Runtime toggles\n\nSaves `checkpoints/runtime_toggles.json`. Set `USE_SAVED_ARTIFACTS = False` to force a full retrain."),
+        _md("---\n\n## Phase 0 — Runtime toggles\n\nSaves `checkpoints/runtime_toggles.json`. Set `USE_SAVED_ARTIFACTS = False` to force a full retrain.\n\n**Speed (accuracy-preserving):** Hier/Elo tuning uses O(1) weights, combo caching, single predict+update, incremental season CV, and process-parallel Optuna. Keep full trial counts (`FAST_BACKTEST=False`); raise `OPTUNA_N_JOBS` on Colab high-RAM / local multi-core."),
         _code('''# ============================================================================
 #  PHASE 0 · Runtime toggles (speed vs accuracy)
 # ============================================================================
 USE_SAVED_ARTIFACTS = False  # False: always recompute (recommended after model changes)
 QUICK = False
-FAST_BACKTEST = False
+FAST_BACKTEST = False  # True = fewer trials (faster, less search). Keep False for full accuracy.
 USE_STINTS_CACHE = True
 USE_TUNING_CACHE = True
 WALKFORWARD_ZONE_PPS = True
+
+# Process-parallel Optuna workers for Elo/Hier tuning (same n_trials + full CV).
+# Colab free ~2; Colab Pro / local Mac often 4–8. Set 1 for fully serial TPE order.
+import os
+OPTUNA_N_JOBS = int(os.environ.get("OPTUNA_N_JOBS", "4"))
+os.environ["OPTUNA_N_JOBS"] = str(max(1, OPTUNA_N_JOBS))
 
 if FAST_BACKTEST:
     ELO_TRIALS, HIER_TRIALS, META_TRIALS, TOTAL_TRIALS, META_WIN_TRIALS, WINDOW = 12, 15, 15, 8, 12, 2
@@ -380,6 +486,7 @@ toggle_payload = {
     "USE_STINTS_CACHE": USE_STINTS_CACHE,
     "USE_TUNING_CACHE": USE_TUNING_CACHE,
     "WALKFORWARD_ZONE_PPS": WALKFORWARD_ZONE_PPS,
+    "OPTUNA_N_JOBS": OPTUNA_N_JOBS,
     "ELO_TRIALS": ELO_TRIALS,
     "HIER_TRIALS": HIER_TRIALS,
     "META_TRIALS": META_TRIALS,
@@ -403,7 +510,8 @@ toggle_payload = {
 save_json_artifact("toggles", toggle_payload)
 print(
     f"Toggles: USE_SAVED={USE_SAVED_ARTIFACTS}  QUICK={QUICK}  FAST_BACKTEST={FAST_BACKTEST}  "
-    f"stints_cache={USE_STINTS_CACHE}  tuning_cache={USE_TUNING_CACHE}"
+    f"stints_cache={USE_STINTS_CACHE}  tuning_cache={USE_TUNING_CACHE}  "
+    f"OPTUNA_N_JOBS={os.environ['OPTUNA_N_JOBS']}"
 )
 print(f"Trials: elo={ELO_TRIALS} hier={HIER_TRIALS} meta={META_TRIALS} total={TOTAL_TRIALS} meta_win={META_WIN_TRIALS} window={WINDOW}")'''),
 
@@ -412,6 +520,7 @@ print(f"Trials: elo={ELO_TRIALS} hier={HIER_TRIALS} meta={META_TRIALS} total={TO
 #  PHASE 1 · Load odds + build leak-free stint timelines
 # ============================================================================
 import hashlib
+from IPython.display import display
 
 def read_csv_fast(path):
     try:
@@ -420,16 +529,35 @@ def read_csv_fast(path):
         return pd.read_csv(path, low_memory=False)
 
 def _stints_cache_key(paths, quick, walkforward_zone_pps):
+    """Match pipeline.stint_loader.stints_cache_key (schema versions included)."""
     h = hashlib.md5()
     for season, path in sorted(paths, key=lambda kv: kv[0]):
         p = Path(path)
         if p.exists():
             stt = p.stat()
             h.update(f"{season}:{p.name}:{int(stt.st_mtime)}:{stt.st_size}".encode())
-    h.update(f"q={quick};wzpps={walkforward_zone_pps};as={ASSIST_SPLIT}".encode())
+    h.update(f"q={quick};wzpps={walkforward_zone_pps};as={ASSIST_SPLIT};zones=v2".encode())
+    h.update(
+        f"prep={PREPROCESSING_SCHEMA_VERSION};feat={FEATURE_SCHEMA_VERSION};"
+        f"mkt={MARKET_SNAPSHOT_SCHEMA_VERSION};val={VALIDATION_SCHEMA_VERSION}".encode()
+    )
     return h.hexdigest()[:16]
 
 def load_all_stints(quick=False, walkforward_zone_pps=True, use_cache=True) -> pd.DataFrame:
+    # Prefer shared loader when available (sidecar built_at + fingerprint).
+    try:
+        from pipeline.stint_loader import load_stints as _load_stints
+        paths = list(V3_DATA_PATHS.items())
+        if PBP_2026_PATH.exists():
+            paths.append((2025, PBP_2026_PATH))
+        st, meta = _load_stints(
+            paths=paths, quick=quick, walkforward_zone_pps=walkforward_zone_pps,
+            use_cache=use_cache, cache_dir=STATE_DIR, stints_mode="rebuild" if not use_cache else "auto",
+        )
+        print(f"  stints built_at={meta.get('built_at')}  key={meta.get('cache_key')}  hit={meta.get('cache_hit')}")
+        return st
+    except Exception as _e:
+        print(f"  ⚠️ stint_loader fallback ({_e})")
     paths = list(V3_DATA_PATHS.items())
     if PBP_2026_PATH.exists():
         paths.append((2025, PBP_2026_PATH))
@@ -481,7 +609,7 @@ def load_all_stints(quick=False, walkforward_zone_pps=True, use_cache=True) -> p
     if not frames:
         raise FileNotFoundError("No PBP data found under basketballData/")
     allst = pd.concat(frames, ignore_index=True)
-    allst["game_date"] = pd.to_datetime(allst["game_date"], errors="coerce")
+    allst["game_date"] = pd.to_datetime(allst["game_date"], format="mixed", errors="coerce")
     allst = allst.sort_values(["game_date", "GAME_ID", "stint_id"]).reset_index(drop=True)
     if use_cache and cache_path is not None:
         try:
@@ -1006,7 +1134,10 @@ if use_saved_artifacts("4") and (STATE_DIR / "meta.pkl").exists():
     final_hier = HierarchicalPossessionEngine.load_state(STATE_DIR / "hier.pkl")
     final_elo = PlayerRatingTracker.load_state(STATE_DIR / "elo.pkl")
     final_pace = PaceTracker.load_state(STATE_DIR / "pace.pkl") if (STATE_DIR / "pace.pkl").exists() else PaceTracker()
-    final_xppp = TeamXpppTracker()
+    if (STATE_DIR / "xppp.pkl").exists():
+        final_xppp = TeamXpppTracker.load_state(STATE_DIR / "xppp.pkl")
+    else:
+        final_xppp = TeamXpppTracker(window_size=40, prev_season_weight=0.5)
     final_form = TeamFormTracker.load_state(STATE_DIR / "form.pkl") if (STATE_DIR / "form.pkl").exists() else TeamFormTracker()
     final_rotation = RotationLineupTracker.load_state(STATE_DIR / "rotation.pkl") if (STATE_DIR / "rotation.pkl").exists() else RotationLineupTracker()
     final_lineup_elo = LineupEloTracker.load_state(STATE_DIR / "lineup_elo.pkl") if (STATE_DIR / "lineup_elo.pkl").exists() else LineupEloTracker()
@@ -1030,34 +1161,32 @@ if use_saved_artifacts("4") and (STATE_DIR / "meta.pkl").exists():
 
 if not engines_loaded:
     train_df = all_stints.copy()
-    if "final_feats" not in dir() or final_feats is None:
-        if ARTIFACTS["final_feats"].exists():
-            final_feats = pd.read_parquet(ARTIFACTS["final_feats"])
-            print(f"⚡ Loaded feature matrix from {ARTIFACTS['final_feats']}")
-        else:
-            best_elo_raw = tune_elo_tracker(train_df, DEFAULT_LEAGUE_XPPP, n_trials=ELO_TRIALS)
-            best_elo = map_elo_params(best_elo_raw)
-            best_hier = tune_hierarchical(train_df, n_trials=HIER_TRIALS)
-            final_hier = HierarchicalPossessionEngine(**best_hier)
-            final_elo = PlayerRatingTracker(config=best_elo, league_xppp=DEFAULT_LEAGUE_XPPP)
-            final_pace = PaceTracker(team_window=10, league_window=100)
-            final_xppp = TeamXpppTracker(window_size=40, prev_season_weight=0.5)
-            final_form = TeamFormTracker(window=15, prev_season_weight=0.4)
-            final_rotation = RotationLineupTracker()
-            final_lineup_elo = LineupEloTracker()
-            final_chemistry = ChemistryTracker()
-            final_team_elo = TeamEloTracker()
-            final_travel = TravelTracker()
-            final_feats = generate_features(
-                train_df, final_hier, final_elo, final_pace,
-                odds_dict=modern_odds_dict, update_engines=True,
-                team_xppp_tracker=final_xppp, team_form_tracker=final_form,
-                rotation_tracker=final_rotation, lineup_elo_tracker=final_lineup_elo,
-                chemistry_tracker=final_chemistry, team_elo_tracker=final_team_elo,
-                travel_tracker=final_travel,
-            )
-            final_feats = engineer_interaction_features(final_feats)
+    if "final_feats" not in dir():
+        final_feats = None
+    # Prefer Phase 3 walked engines (feat_*) so Phase 5 doesn't get virgin trackers
+    # while Meta trains on Phase 3 features.
+    _phase3_engines = all(
+        name in dir() and globals().get(name) is not None
+        for name in (
+            "feat_elo", "feat_hier", "feat_pace", "feat_xppp", "feat_form",
+            "feat_rotation", "feat_lineup_elo", "feat_chemistry", "feat_team_elo",
+            "feat_travel",
+        )
+    )
+    if final_feats is None and ARTIFACTS["final_feats"].exists():
+        final_feats = pd.read_parquet(ARTIFACTS["final_feats"])
+        print(f"⚡ Loaded feature matrix from {ARTIFACTS['final_feats']}")
+
+    if _phase3_engines and final_feats is not None:
+        print("♻️  Reusing Phase 3 walked engines (feat_*) for Phase 4/5")
+        final_elo, final_hier, final_pace = feat_elo, feat_hier, feat_pace
+        final_xppp, final_form = feat_xppp, feat_form
+        final_rotation, final_lineup_elo = feat_rotation, feat_lineup_elo
+        final_chemistry, final_team_elo = feat_chemistry, feat_team_elo
+        final_travel = feat_travel
     else:
+        # Always walk engines — never train Meta on features from one walk
+        # while saving un-updated virgin trackers for Phase 5.
         best_elo_raw = tune_elo_tracker(train_df, DEFAULT_LEAGUE_XPPP, n_trials=ELO_TRIALS)
         best_elo = map_elo_params(best_elo_raw)
         best_hier = tune_hierarchical(train_df, n_trials=HIER_TRIALS)
@@ -1071,6 +1200,21 @@ if not engines_loaded:
         final_chemistry = ChemistryTracker()
         final_team_elo = TeamEloTracker()
         final_travel = TravelTracker()
+        walked = generate_features(
+            train_df, final_hier, final_elo, final_pace,
+            odds_dict=modern_odds_dict, update_engines=True,
+            team_xppp_tracker=final_xppp, team_form_tracker=final_form,
+            rotation_tracker=final_rotation, lineup_elo_tracker=final_lineup_elo,
+            chemistry_tracker=final_chemistry, team_elo_tracker=final_team_elo,
+            travel_tracker=final_travel,
+        )
+        walked = engineer_interaction_features(walked)
+        if final_feats is None:
+            final_feats = walked
+            final_feats.to_parquet(ARTIFACTS["final_feats"], index=False)
+            print(f"💾 Saved feature matrix → {ARTIFACTS['final_feats']}")
+        else:
+            print("ℹ️  Kept existing final_feats; engines walked to match Phase 5 state")
 
     calib_cut = max(len(final_feats) // 5, 80)
     meta_train = final_feats.iloc[:-calib_cut]
@@ -1102,6 +1246,7 @@ if not engines_loaded:
     final_elo.save_state(STATE_DIR / "elo.pkl")
     final_hier.save_state(STATE_DIR / "hier.pkl")
     final_pace.save_state(STATE_DIR / "pace.pkl")
+    final_xppp.save_state(STATE_DIR / "xppp.pkl")
     final_form.save_state(STATE_DIR / "form.pkl")
     final_meta.save(STATE_DIR / "meta.pkl")
     final_rotation.save_state(STATE_DIR / "rotation.pkl")
@@ -1133,6 +1278,48 @@ except Exception as e:
         _code('''# ============================================================================
 #  PHASE 5 · Daily prediction for an upcoming game
 # ============================================================================
+_needed = ("final_hier", "final_elo", "final_meta", "final_pace")
+_missing = [n for n in _needed if n not in dir() or globals().get(n) is None]
+if _missing:
+    raise RuntimeError(
+        f"Phase 5 missing engines {_missing}. Run Phase 4 first "
+        f"(or set USE_SAVED_ARTIFACTS=True with state/*.pkl present)."
+    )
+if "final_xppp" not in dir() or final_xppp is None:
+    if (STATE_DIR / "xppp.pkl").exists():
+        final_xppp = TeamXpppTracker.load_state(STATE_DIR / "xppp.pkl")
+    else:
+        final_xppp = TeamXpppTracker(window_size=40, prev_season_weight=0.5)
+if "final_form" not in dir() or final_form is None:
+    final_form = TeamFormTracker()
+if "final_rotation" not in dir() or final_rotation is None:
+    final_rotation = RotationLineupTracker()
+if "final_lineup_elo" not in dir() or final_lineup_elo is None:
+    final_lineup_elo = LineupEloTracker()
+if "final_chemistry" not in dir() or final_chemistry is None:
+    final_chemistry = ChemistryTracker()
+if "final_team_elo" not in dir() or final_team_elo is None:
+    final_team_elo = TeamEloTracker()
+if "final_travel" not in dir() or final_travel is None:
+    final_travel = TravelTracker()
+if "last_game_dates" not in dir() or last_game_dates is None:
+    last_game_dates = {}
+
+# Seed Elo xPPP priors from current rotation (empty-history warm-start; low
+# turnover leaves observed rolling xPPP as source of truth).
+_prior = {}
+if "final_rotation" in dir() and final_rotation is not None:
+    for _t in list(getattr(final_rotation, "history", {}).keys()):
+        _pairs = final_rotation.expected_weights(_t)
+        _prior[_t] = {pid for pid, _ in _pairs} if _pairs else set()
+refresh_team_priors_for_season(
+    final_xppp,
+    elo_tracker=final_elo,
+    pace_tracker=final_pace if "final_pace" in dir() else None,
+    rotation_tracker=final_rotation,
+    prior_rosters=_prior,
+)
+
 if "final_score_pair" not in dir() and (STATE_DIR / "score_pair.pkl").exists():
     final_score_pair = MetaScorePairModel.load(STATE_DIR / "score_pair.pkl")
 if "final_win" not in dir() and (STATE_DIR / "win.pkl").exists():
@@ -1249,15 +1436,23 @@ def build_notebook() -> dict:
 
 def main():
     nb = build_notebook()
-    OUT.write_text(json.dumps(nb, indent=1))
+    text = json.dumps(nb, indent=1)
+    for dest in (OUT, OUT_CODE, OUT_REPO):
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text)
+            print(f"Wrote {dest} ({dest.stat().st_size:,} bytes)")
+        except Exception as e:
+            print(f"⚠️ could not write {dest}: {e}")
     n_code = sum(1 for c in nb["cells"] if c["cell_type"] == "code")
-    print(f"Wrote {OUT}")
     print(f"  cells: {len(nb['cells'])} ({n_code} code)")
-    print(f"  size:  {OUT.stat().st_size:,} bytes")
     print(f"  modules inlined: {len(MODULE_ORDER)}")
 
-    # Quick structural validation
+    # Optional structural validation (can be slow / hang on large notebooks).
+    import os
     import subprocess
+    if os.environ.get("VALIDATE_NOTEBOOK", "").strip() not in ("1", "true", "True"):
+        return
     r = subprocess.run(
         [sys.executable, str(ROOT / "tests" / "test_notebook_exec.py")],
         cwd=str(ROOT),

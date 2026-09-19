@@ -4,9 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from pipeline.ablation import compute_metrics, passes_ablation_gate
+from pipeline.ablation import passes_ablation_gate
 from pipeline.config import MAX_QUANTILE_WIDTH, MIN_CONFIDENCE_SCORE, MIN_EDGE_BUCKET
-from pipeline.metrics import add_all_profile_columns
+from pipeline.metrics import add_all_profile_columns, compute_metrics
 
 
 def _apply_edge_bucket_filter(df: pd.DataFrame, min_edge: float = MIN_EDGE_BUCKET) -> pd.DataFrame:

@@ -29,6 +29,14 @@ class AdaptiveParameterBounds:
     INITIAL_SHRINK = 0.50          # after first season, use ±50% of original range
     EXPLORE_JITTER = 0.05          # random ±5% jitter around the center (applied 30% of the time)
 
+    @staticmethod
+    def _config_min_shrink() -> float:
+        try:
+            from pipeline.config import ADAPTIVE_BOUNDS_MIN_SHRINK
+            return float(ADAPTIVE_BOUNDS_MIN_SHRINK)
+        except Exception:
+            return 0.45
+
     # Optuna search names → stored config keys (Elo/Hier rename on return).
     PARAM_ALIASES = {
         "k_off": ("K_OFF",),
@@ -91,9 +99,12 @@ class AdaptiveParameterBounds:
     def _shrink_factor(self) -> float:
         if self.seasons_seen == 0:
             return 1.0
-        min_frac = self.MIN_RANGE_FRACTION
+        # Floor shrink so Optuna can still explore edges (calib3h: 0.5→0.25 crushed search).
+        floor = max(self.MIN_RANGE_FRACTION, self._config_min_shrink())
+        min_frac = floor
         if max(self._bound_hits.values(), default=0) >= 2:
-            min_frac = max(min_frac, self.MIN_RANGE_FRACTION_TIGHT)
+            # Bound hits → *widen* slightly via higher floor, do not crush further.
+            min_frac = max(min_frac, self.MIN_RANGE_FRACTION_TIGHT, floor)
         if self.seasons_seen >= self.PLATEAU_AFTER:
             return min_frac
         raw = self.INITIAL_SHRINK * (self.DECAY_RATE ** (self.seasons_seen - 1))
@@ -372,6 +383,14 @@ SHOT_QUALITY_COLS = [
     "rim_def_diff", "peri_def_diff",
 ]
 
+PACE_UNCERTAINTY_COLS = [
+    "pace_mean", "pace_var", "pace_std", "pace_q10", "pace_q90",
+    "pace_baseline", "pace_eff_n",
+]
+
+from pipeline.shot_hierarchy import HIER_SHOT_FEATURE_COLS
+from pipeline.structured_score import STRUCTURED_SCORE_COLS
+
 LINEUP_COMPOSITE_COLS = [
     "h_lineup_composite", "a_lineup_composite", "lineup_composite_diff",
     "h_chem_duo_net", "a_chem_duo_net", "h_chem_trio_net", "a_chem_trio_net",
@@ -385,6 +404,9 @@ EXTENDED_FEATURE_COLS = [
     "h_chem_net", "a_chem_net", "chem_diff", "h_onoff_net", "a_onoff_net", "chem_uncertainty", "usage_conflict",
     *LINEUP_COMPOSITE_COLS,
     *SHOT_QUALITY_COLS,
+    *HIER_SHOT_FEATURE_COLS,
+    *STRUCTURED_SCORE_COLS,
+    *PACE_UNCERTAINTY_COLS,
     *HAPM_COLS,
     "team_elo_spread", "team_elo_total_adj", "team_elo_net",
     "h_travel_miles_7d", "a_travel_miles_7d", "travel_miles_diff", "h_tz_shift", "a_tz_shift",
@@ -396,6 +418,19 @@ EXTENDED_FEATURE_COLS = [
 ]
 
 MARKET_MICRO_COLS = ["reverse_line_movement", "steam_flag", "fair_spread_vigfree", "public_away_pct"]
+
+# Features that encode the decision/T-60 line. Under ``decision_residual``
+# training these let the stack learn r̂ ≈ k·decision_spread; subtracting the
+# line then cancels variance (margin slope vs market collapses toward 0).
+LINE_DERIVED_FEATURE_COLS = [
+    "elo_vs_market",
+    "elo_edge_pts",
+    "fair_spread_vigfree",
+    *MARKET_MICRO_COLS,
+    "public_home_pct",
+    "spread_move",
+    "market_fair_win_prob",
+]
 
 SAFE_FEATURE_COLS = [
     *CORE_FEATURE_COLS,
@@ -410,6 +445,15 @@ SAFE_FEATURE_COLS = [
     *EXTENDED_FEATURE_COLS,
     *AVAILABILITY_IMPACT_COLS,
     "elo_stack_pred",
+    # Matchup offense-vs-defense layer (T-60 Phase 2).
+    "matchup_home_pp100", "matchup_away_pp100", "matchup_margin", "matchup_total",
+    "matchup_home_pts", "matchup_away_pts", "matchup_uncertainty",
+    "matchup_home_offense_pp100", "matchup_away_offense_pp100",
+    "matchup_off_vs_def_home", "matchup_off_vs_def_away",
+    # sf_* are OOF-only training columns / serve-time parity — not in SAFE
+    # feature matrix until attach_oof_shared_forecasts + serve emit are both on.
+    # Additive league-z features (populated only when USE_ROLLING_LEAGUE_Z).
+    "pace_diff_lz", "elo_net_lz", "roll_net_xppp_lz", "elo_margin_lz",
 ]
 
 # Moneyline: strength, Elo, efficiency, HCA, availability, rest, market movement.
@@ -462,6 +506,9 @@ TOTAL_FEATURE_COLS = [
     "h_three_rate", "a_three_rate", "three_rate_diff",
     "h_sos", "a_sos", "sos_diff",
     "h_pace", "a_pace",
+    "pace_mean", "pace_var", "pace_std", "pace_baseline",
+    "h_hier_shot_pps", "a_hier_shot_pps", "hier_shot_pps_diff",
+    "struct_total", "struct_margin", "struct_sigma_total",
     "h_expected_off_drop", "a_expected_off_drop",
     "h_expected_pace_delta", "a_expected_pace_delta",
     "expected_off_drop_diff", "expected_pace_delta_diff",
@@ -544,16 +591,20 @@ from pipeline.cv import PurgedGroupTimeSeriesSplit, ChronologicalPartitionCV, Pa
 from pipeline.oof import ManualOOFStacker, cross_fit_derived_feature
 from pipeline.market_targets import (
     closing_spread_series,
+    decision_spread_series,
+    margin_decision_residual,
     margin_close_residual,
     residual_to_margin,
     market_total_series,
     total_market_residual,
     residual_to_total,
     valid_closing_fraction,
+    valid_decision_fraction,
     valid_market_total_fraction,
 )
 from pipeline.config import (
     ELO_BLEND_ALPHA,
+    ELO_BLEND_ALPHA_MAX,
     ELO_RIDGE_ALPHA,
     ELO_UNCERTAINTY_BLEND_BOOST,
     ELO_WIN_BLEND,
@@ -570,14 +621,48 @@ from pipeline.config import (
     APPLY_SPREAD_CALIB_IN_CV,
     META_WIN_LOSS_BRIER_WEIGHT,
     META_WIN_LOSS_ECE_WEIGHT,
-    META_WIN_LOSS_ML_ROI_WEIGHT,
     TOTAL_LOSS_MAE_WEIGHT,
-    TOTAL_LOSS_OU_ROI_WEIGHT,
     TOTAL_TRAIN_TARGET,
     ML_USE_SPREAD_FEATURES,
+    META_RECENCY_HALF_LIFE_SEASONS,
+    META_RECENCY_SEASON_DAYS,
 )
 
 MARGIN_CAP_CHOICES = [20.0, 25.0, 30.0, 35.0, 40.0, 45.0, None]
+
+
+def recency_sample_weights(
+    dates,
+    *,
+    half_life_seasons: float | None = None,
+    season_days: float | None = None,
+) -> np.ndarray:
+    """Exponential recency weights: ``0.5 ** ((t_max - t) / half_life_days)``."""
+    half = float(
+        META_RECENCY_HALF_LIFE_SEASONS if half_life_seasons is None else half_life_seasons
+    )
+    days_per = float(META_RECENCY_SEASON_DAYS if season_days is None else season_days)
+    half_life_days = max(half * days_per, 1.0)
+    ts = pd.to_datetime(pd.Series(dates), errors="coerce")
+    if ts.isna().all():
+        return np.ones(len(ts), dtype=float)
+    t_max = ts.max()
+    age_days = (t_max - ts).dt.total_seconds().to_numpy(dtype=float) / 86400.0
+    age_days = np.where(np.isfinite(age_days), np.maximum(age_days, 0.0), 0.0)
+    w = np.power(0.5, age_days / half_life_days)
+    return np.asarray(w, dtype=float)
+
+
+def _frame_recency_weights(df: pd.DataFrame) -> np.ndarray | None:
+    """Build recency weights from game_date when present; else None (uniform)."""
+    if df is None or df.empty:
+        return None
+    date_col = "game_date" if "game_date" in df.columns else ("DATE" if "DATE" in df.columns else None)
+    if date_col is None:
+        return None
+    if float(META_RECENCY_HALF_LIFE_SEASONS) <= 0:
+        return None
+    return recency_sample_weights(df[date_col])
 
 
 class _ScaledEstimator:
@@ -662,7 +747,7 @@ class MetaScoreModel:
                  use_purged_cv=True, segment=None, ou_min_edge=3.0,
                  elo_blend_alpha=0.35, elo_ridge_alpha=3.0,
                  dynamic_elo_blend=True, total_elo_beta=None,
-                 elo_win_blend=None, train_target="close_residual",
+                 elo_win_blend=None, train_target="decision_residual",
                  use_quantile_heads=True, quantile_alphas=(0.1, 0.9),
                  use_lightgbm_base=False):
         """
@@ -692,6 +777,10 @@ class MetaScoreModel:
         feature_cols : list or None
             Feature columns the model consumes. Defaults to SAFE_FEATURE_COLS;
             the ablation harness passes subsets here.
+        train_target : str
+            ``decision_residual`` (default) trains against the T-60 decision
+            spread; ``close_residual`` is accepted as a deprecated alias;
+            ``absolute`` trains raw margin.
         """
         self.ridge_alpha = ridge_alpha
         self.huber_epsilon = huber_epsilon
@@ -702,17 +791,24 @@ class MetaScoreModel:
         self.use_elo_stack = use_elo_stack
         self.prediction_mode = prediction_mode  # absolute | residual | blend
         self.residual_alpha = residual_alpha
-        self.train_target = train_target  # close_residual | absolute
+        # Normalize deprecated close_residual alias → decision_residual.
+        if train_target == "close_residual":
+            train_target = "decision_residual"
+        self.train_target = train_target  # decision_residual | absolute
         self.use_quantile_heads = use_quantile_heads
         self.quantile_alphas = tuple(quantile_alphas)
         self.use_lightgbm_base = use_lightgbm_base
         self.segment = segment
         self.ou_min_edge = ou_min_edge
-        self.elo_blend_alpha = elo_blend_alpha
+        self.elo_blend_alpha = float(np.clip(float(elo_blend_alpha), 0.0, float(ELO_BLEND_ALPHA_MAX)))
         self.elo_ridge_alpha = elo_ridge_alpha
         self.dynamic_elo_blend = dynamic_elo_blend
         self.total_elo_beta = TOTAL_ELO_BETA if total_elo_beta is None else total_elo_beta
         self.quantile_models = {}
+        self.blowout_models = {}
+        self.blowout_scaler = None
+        from pipeline.config import BLOWOUT_THRESHOLDS
+        self.blowout_thresholds = tuple(BLOWOUT_THRESHOLDS)
         self.elo_ridge = None
         self.elo_scaler = None
         self._elo_cols = []
@@ -796,6 +892,10 @@ class MetaScoreModel:
 
     def _elo_matrix(self, X_df):
         cols = [c for c in ELO_STACK_FEATURES if c in X_df.columns]
+        mode = getattr(self, "_active_train_mode", self.train_target)
+        if mode == "decision_residual":
+            ban = set(LINE_DERIVED_FEATURE_COLS)
+            cols = [c for c in cols if c not in ban]
         self._elo_cols = cols
         if not cols:
             return np.zeros((len(X_df), 1))
@@ -811,43 +911,61 @@ class MetaScoreModel:
             out["elo_stack_pred"] = 0.0
         return out
 
+    def _active_feature_list(self, mode: str | None = None) -> list:
+        """Feature columns for the active train mode (strip line-derived under residual)."""
+        feats = list(self.features)
+        mode = mode or getattr(self, "_active_train_mode", self.train_target)
+        if mode == "decision_residual":
+            ban = set(LINE_DERIVED_FEATURE_COLS)
+            feats = [c for c in feats if c not in ban]
+        return feats
+
     def _get_features(self, X_df):
         """Extract and clean the safe feature set."""
-        missing = [c for c in self.features if c not in X_df.columns]
+        cols = self._active_feature_list()
+        missing = [c for c in cols if c not in X_df.columns]
         if missing:
             X_df = X_df.copy()
             for col in missing:
                 X_df[col] = 0.0
-        return X_df[self.features].fillna(0)
+        return X_df[cols].fillna(0)
 
     def _effective_train_target(self, X_df) -> str:
-        if self.train_target != "close_residual":
+        if self.train_target != "decision_residual":
             return "absolute"
-        close = closing_spread_series(X_df)
-        if close is None or valid_closing_fraction(X_df) < 0.5:
+        decision = decision_spread_series(X_df)
+        if decision is None or valid_decision_fraction(X_df) < 0.5:
             return "absolute"
-        return "close_residual"
+        return "decision_residual"
 
     def _build_stack_target(self, y_margin, X_df):
         mode = self._effective_train_target(X_df)
-        if mode == "close_residual":
-            close = closing_spread_series(X_df)
-            return margin_close_residual(y_margin, close.values), mode
+        if mode == "decision_residual":
+            decision = decision_spread_series(X_df)
+            return margin_decision_residual(y_margin, decision.values), mode
         return np.asarray(y_margin, dtype=float), mode
 
     def _stack_output_to_margin(self, stack_pred, X_df, mode=None):
         if mode is None:
             mode = self._effective_train_target(X_df)
         pred = np.asarray(stack_pred, dtype=float)
-        if mode != "close_residual":
+        if mode != "decision_residual":
             return pred
-        close = closing_spread_series(X_df)
-        if close is None:
+        decision = decision_spread_series(X_df)
+        if decision is None:
             return pred
-        return residual_to_margin(pred, close.values)
+        return residual_to_margin(pred, decision.values)
+
+    def _decision_from_feat(self, feat_dict):
+        for key in ("decision_spread", "market_spread"):
+            val = feat_dict.get(key)
+            if val is not None and not pd.isna(val):
+                return float(val)
+        return np.nan
 
     def _closing_from_feat(self, feat_dict):
-        for key in ("closing_spread", "market_spread"):
+        """Evaluation-only close lookup (CLV). Prefer decision for live bets."""
+        for key in ("closing_spread", "decision_spread", "market_spread"):
             val = feat_dict.get(key)
             if val is not None and not pd.isna(val):
                 return float(val)
@@ -873,6 +991,42 @@ class MetaScoreModel:
             except Exception as e:  # noqa: BLE001
                 print(f"⚠️ quantile head {key} fit failed ({e})")
 
+    def _fit_blowout_heads(self, X_scaled, y_margin_abs: np.ndarray):
+        """Binary heads for P(|margin| >= k) at each configured threshold."""
+        self.blowout_models = {}
+        self.blowout_scaler = StandardScaler()
+        try:
+            Xs = self.blowout_scaler.fit_transform(X_scaled)
+        except Exception:
+            self.blowout_scaler = None
+            return
+        for thr in self.blowout_thresholds:
+            y = (np.asarray(y_margin_abs, dtype=float) >= float(thr)).astype(int)
+            if len(np.unique(y)) < 2 or y.sum() < 30:
+                continue
+            clf = LogisticRegression(C=0.25, solver="lbfgs", max_iter=300)
+            try:
+                clf.fit(Xs, y)
+                self.blowout_models[int(thr)] = clf
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️ blowout head |m|>={thr} fit failed ({e})")
+
+    def predict_blowout_probs(self, feat_dict) -> dict[int, float]:
+        """Return {threshold: P(|margin| >= threshold)} for a single game."""
+        out = {int(t): 0.5 for t in self.blowout_thresholds}
+        if not self.fitted or not self.blowout_models or self.blowout_scaler is None:
+            return out
+        try:
+            row = dict(feat_dict)
+            X_work = self._augment_elo_stack(pd.DataFrame([row]))
+            X_scaled = self.scaler.transform(self._get_features(X_work))
+            Xs = self.blowout_scaler.transform(X_scaled)
+            for thr, clf in self.blowout_models.items():
+                out[int(thr)] = float(np.clip(clf.predict_proba(Xs)[0, 1], 0.01, 0.99))
+        except Exception:
+            pass
+        return out
+
     def fit(self, X_df, y_home, y_away, calib_df=None):
         """
         Fit the stacking ensemble on the base set, then optionally calibrate
@@ -881,6 +1035,8 @@ class MetaScoreModel:
         y_margin = np.asarray(y_home - y_away, dtype=float)
         y_stack, train_mode = self._build_stack_target(y_margin, X_df)
         self._active_train_mode = train_mode
+        # Persist the feature contract used for this fit (residual strips line-derived).
+        self.features = self._active_feature_list(train_mode)
         if self.margin_cap is not None:
             y_margin_target = np.clip(y_stack, -self.margin_cap, self.margin_cap)
         else:
@@ -929,9 +1085,11 @@ class MetaScoreModel:
 
         X = self._get_features(X_work)
         X_scaled = self.scaler.fit_transform(X)
-        self.stack.fit(X_scaled, y_margin_target, groups=stack_groups)
+        sample_weight = _frame_recency_weights(X_df)
+        self.stack.fit(X_scaled, y_margin_target, groups=stack_groups, sample_weight=sample_weight)
 
         self._fit_quantile_heads(X_scaled, y_margin_target)
+        self._fit_blowout_heads(X_scaled, np.abs(y_margin))
 
         # Fit the TOTAL head (pace/scoring aware) on the same scaled features.
         if self.total_mode == "model":
@@ -984,9 +1142,12 @@ class MetaScoreModel:
 
     def _apply_prediction_mode(self, raw_margin, feat_dict):
         """Blend absolute prediction with market-residual mode (predict-time only)."""
-        if getattr(self, "_active_train_mode", "absolute") == "close_residual":
+        if getattr(self, "_active_train_mode", "absolute") == "decision_residual":
             return raw_margin
-        market_spread = feat_dict.get("market_spread") or feat_dict.get("closing_spread")
+        market_spread = (
+            feat_dict.get("decision_spread")
+            or feat_dict.get("market_spread")
+        )
         if self.prediction_mode == "absolute" or market_spread is None or pd.isna(market_spread):
             return raw_margin
         market_prior = -float(market_spread)
@@ -997,12 +1158,20 @@ class MetaScoreModel:
 
     def _dynamic_elo_blend_alpha(self, row: dict) -> float:
         """Increase Elo anchor weight when lineup uncertainty is high."""
+        from pipeline.config import ELO_BLEND_ALPHA_MAX
+
         base = float(self.elo_blend_alpha)
+        max_a = float(ELO_BLEND_ALPHA_MAX)
+        base = min(base, max_a)
         if not self.dynamic_elo_blend:
             return base
         unc = float(row.get("uncertainty_diff", 0) or 0)
         boost = ELO_UNCERTAINTY_BLEND_BOOST * max(0.0, (unc - 50.0) / 300.0)
-        return float(np.clip(base + boost, 0.0, 0.65))
+        return float(np.clip(base + boost, 0.0, max_a))
+
+    def _clip_elo_blend_alpha(self, alpha: float) -> float:
+        from pipeline.config import ELO_BLEND_ALPHA_MAX
+        return float(np.clip(float(alpha), 0.0, float(ELO_BLEND_ALPHA_MAX)))
 
     def _elo_implied_total(self, row: dict) -> float | None:
         return elo_implied_total_from_row(row)
@@ -1058,6 +1227,7 @@ class MetaScoreModel:
             pred_total = (1.0 - self.total_elo_beta) * pred_total + self.total_elo_beta * elo_total
         pred_home = (pred_total + raw_margin) / 2.0
         pred_away = (pred_total - raw_margin) / 2.0
+        blowout_probs = self.predict_blowout_probs(row)
 
         return {
             'pred_home': float(pred_home),
@@ -1069,6 +1239,7 @@ class MetaScoreModel:
             'spread_q10': spread_q10,
             'spread_q90': spread_q90,
             'spread_quantile_width': spread_q_width,
+            'blowout_probs': blowout_probs,
         }
 
     def _ou_signal(self, feat_dict, pred_total):
@@ -1151,16 +1322,16 @@ def _augment_elo_stack_cv(X_df, y_margin_target, elo_cols, alpha=5.0):
 
 def _margin_tuning_objective(
     df, X_base, trial, b, EMBARGO, use_elo_stack=True, fast_mode=False,
-    train_target="close_residual",
+    train_target="decision_residual",
 ):
     """Shared margin-model Optuna objective — margin/probability-first
     (Task 055: no ROI/edge-grid/CLV terms; overfit penalty penalizes
     val_mae exceeding train_mae)."""
-    close_all = closing_spread_series(df)
-    use_close_residual = (
-        train_target == "close_residual"
-        and close_all is not None
-        and valid_closing_fraction(df) >= 0.5
+    decision_all = decision_spread_series(df)
+    use_decision_residual = (
+        train_target in ("decision_residual", "close_residual")
+        and decision_all is not None
+        and valid_decision_fraction(df) >= 0.5
     )
 
     cb_iter_lo, cb_iter_hi = (200, 400) if fast_mode else (300, 500)
@@ -1186,6 +1357,8 @@ def _margin_tuning_objective(
         lo, hi = b.suggest_bounds_float('huber_epsilon', 1.01, 4.0)
         huber_epsilon = trial.suggest_float('huber_epsilon', lo, hi)
         lo, hi = b.suggest_bounds_float('elo_blend_alpha', 0.0, 0.65)
+        hi = min(float(hi), float(ELO_BLEND_ALPHA_MAX))
+        lo = min(float(lo), hi)
         elo_blend_alpha = trial.suggest_float('elo_blend_alpha', lo, hi)
         lo, hi = b.suggest_bounds_float('elo_ridge_alpha', 1.0, 12.0, log=True)
         elo_ridge_alpha = trial.suggest_float('elo_ridge_alpha', lo, hi, log=True)
@@ -1196,7 +1369,7 @@ def _margin_tuning_objective(
         cb_lr = trial.suggest_float('cb_lr', 0.01, 0.1, log=True)
         cb_l2 = trial.suggest_float('cb_l2', 1.0, 10.0, log=True)
         huber_epsilon = trial.suggest_float('huber_epsilon', 1.01, 4.0)
-        elo_blend_alpha = trial.suggest_float('elo_blend_alpha', 0.0, 0.65)
+        elo_blend_alpha = trial.suggest_float('elo_blend_alpha', 0.0, float(ELO_BLEND_ALPHA_MAX))
         elo_ridge_alpha = trial.suggest_float('elo_ridge_alpha', 1.0, 12.0, log=True)
 
     margin_cap_choice = trial.suggest_categorical('margin_cap', MARGIN_CAP_CHOICES)
@@ -1230,8 +1403,8 @@ def _margin_tuning_objective(
 
         ym_tr = y_margin.iloc[train_idx]
         ym_val = y_margin.iloc[val_idx]
-        if use_close_residual:
-            ym_tr_fit = margin_close_residual(ym_tr.values, close_all.iloc[train_idx].values)
+        if use_decision_residual:
+            ym_tr_fit = margin_decision_residual(ym_tr.values, decision_all.iloc[train_idx].values)
             if margin_cap_choice is not None:
                 ym_tr_fit = np.clip(ym_tr_fit, -margin_cap_choice, margin_cap_choice)
         elif margin_cap_choice is not None:
@@ -1260,16 +1433,16 @@ def _margin_tuning_objective(
         stack.fit(X_tr_scaled, ym_tr_fit, groups=groups_tr)
 
         val_stack = stack.predict(X_val_scaled)
-        if use_close_residual:
-            val_preds = residual_to_margin(val_stack, close_all.iloc[val_idx].values)
+        if use_decision_residual:
+            val_preds = residual_to_margin(val_stack, decision_all.iloc[val_idx].values)
         else:
             val_preds = val_stack
         if APPLY_SPREAD_CALIB_IN_CV:
             from pipeline.market import SpreadCalibrator
             sc = SpreadCalibrator(window=max(50, len(train_idx)), min_samples=min(30, len(train_idx) // 3))
             train_raw = stack.predict(X_tr_scaled)
-            if use_close_residual:
-                train_raw = residual_to_margin(train_raw, close_all.iloc[train_idx].values)
+            if use_decision_residual:
+                train_raw = residual_to_margin(train_raw, decision_all.iloc[train_idx].values)
             for p, a in zip(train_raw, ym_tr.values):
                 if np.isfinite(p) and np.isfinite(a):
                     sc.update(float(p), float(a))
@@ -1283,11 +1456,12 @@ def _margin_tuning_objective(
                 anchor = X_val[col].values.astype(float)
                 break
         if anchor is not None and elo_blend_alpha > 0:
+            blend_a = float(np.clip(float(elo_blend_alpha), 0.0, float(ELO_BLEND_ALPHA_MAX)))
             mask = np.isfinite(anchor)
             val_preds = val_preds.copy()
             val_preds[mask] = (
-                (1.0 - elo_blend_alpha) * val_preds[mask]
-                + elo_blend_alpha * anchor[mask]
+                (1.0 - blend_a) * val_preds[mask]
+                + blend_a * anchor[mask]
             )
         val_probs = np.clip(1.0 / (1.0 + np.exp(-val_preds / 12.0)), 0.01, 0.99)
         val_mae = mean_absolute_error(ym_val, val_preds)
@@ -1295,8 +1469,8 @@ def _margin_tuning_objective(
         from pipeline.calibration_metrics import compute_ece
         val_ece = compute_ece((ym_val > 0).astype(int), val_probs)
         train_stack = stack.predict(X_tr_scaled)
-        if use_close_residual:
-            train_preds = residual_to_margin(train_stack, close_all.iloc[train_idx].values)
+        if use_decision_residual:
+            train_preds = residual_to_margin(train_stack, decision_all.iloc[train_idx].values)
         else:
             train_preds = train_stack
         train_mae = mean_absolute_error(ym_tr, train_preds)
@@ -1306,6 +1480,19 @@ def _margin_tuning_objective(
         # *lower* than training error and never penalized true overfitting
         # (val_mae >> train_mae), which is backwards.
         overfit_penalty = max(0.0, (val_mae - train_mae) - 1.0) * 2.0
+
+        # Dispersion guard: MAE-only tuning silently accepts margins compressed
+        # toward zero (slope vs market ≪ 1). Penalize slopes below ~0.45.
+        dispersion_penalty = 0.0
+        if decision_all is not None:
+            mkt_imp = (-decision_all.iloc[val_idx].to_numpy(dtype=float))
+            mask_d = np.isfinite(val_preds) & np.isfinite(mkt_imp)
+            if int(mask_d.sum()) >= 30 and float(np.var(mkt_imp[mask_d])) > 1e-6:
+                slope = float(
+                    np.cov(mkt_imp[mask_d], val_preds[mask_d])[0, 1]
+                    / np.var(mkt_imp[mask_d])
+                )
+                dispersion_penalty = max(0.0, 0.45 - slope) * 3.0
 
         # Task 055: margin-model tuning must be a proper-scoring-rule
         # objective on margin/probability quality only. ATS ROI, the
@@ -1321,6 +1508,7 @@ def _margin_tuning_objective(
             + META_LOSS_BRIER_WEIGHT * brier
             + META_LOSS_ECE_WEIGHT * (val_ece if np.isfinite(val_ece) else 0.0)
             + overfit_penalty
+            + dispersion_penalty
         )
         scores.append(combined)
         trial.report(combined, step=fold_idx)
@@ -1352,15 +1540,20 @@ def meta_params_for_bounds(best_params: dict) -> dict:
 def tune_margin_model(train_features_df, n_trials=25, season=None,
                       bounds: 'AdaptiveParameterBounds' = None,
                       feature_cols=None, use_elo_stack=True,
-                      fast_mode=None, train_target="close_residual"):
-    """Tune margin stack with ROI-first objective (matches production fit).
+                      fast_mode=None, train_target="decision_residual"):
+    """Tune margin stack with MAE/Brier/ECE objective (matches production fit).
 
     fast_mode: lighter CV + fewer CatBoost trees during search. Auto-enabled
     when n_trials <= 5 (smoke tests). Full backtests should use fast_mode=False.
     """
+    if train_target == "close_residual":
+        train_target = "decision_residual"
     df = train_features_df.dropna(subset=['actual_margin']).reset_index(drop=True)
     cols = list(feature_cols) if feature_cols else SAFE_FEATURE_COLS
     cols = [c for c in cols if c in df.columns and c != 'elo_stack_pred']
+    if train_target == "decision_residual":
+        ban = set(LINE_DERIVED_FEATURE_COLS)
+        cols = [c for c in cols if c not in ban]
     X_base = df[cols].fillna(0)
     EMBARGO = TUNING_EMBARGO_GAMES
     b = bounds
@@ -1442,7 +1635,7 @@ def tune_margin_model(train_features_df, n_trials=25, season=None,
         'ridge_alpha': best['ridge_alpha'],
         'huber_epsilon': best['huber_epsilon'],
         'margin_cap': best.get('margin_cap', 30.0),
-        'elo_blend_alpha': best.get('elo_blend_alpha', 0.35),
+        'elo_blend_alpha': float(min(float(best.get('elo_blend_alpha', 0.35)), float(ELO_BLEND_ALPHA_MAX))),
         'elo_ridge_alpha': best.get('elo_ridge_alpha', 3.0),
         'cb_params': {
             'depth': best['cb_depth'],
@@ -1457,7 +1650,7 @@ def tune_margin_model(train_features_df, n_trials=25, season=None,
 def tune_total_model(train_features_df, n_trials=20, bounds=None, feature_cols=None,
                      use_elo_stack=True, fast_mode=None, season=None,
                      train_target: str | None = None):
-    """Tune standalone total model with MAE + O/U ROI objective.
+    """Tune standalone total model with MAE-only objective (ROI in policy layer).
 
     fast_mode: lighter outer/inner CV and fewer CatBoost trees during search.
     Auto-enabled when n_trials <= 5 (smoke tests).
@@ -1565,35 +1758,16 @@ def tune_total_model(train_features_df, n_trials=20, bounds=None, feature_cols=N
                     )
             val_mae = mean_absolute_error(y_val, pred)
 
-            ou_roi = 0.0
-            if mkt_val is not None and np.isfinite(mkt_val).sum() >= 15:
-                mkt_v = np.asarray(mkt_val, dtype=float)
-                edge = pred - mkt_v
-                best_r = -1.0
-                for thr in (3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0):
-                    active = np.abs(edge) >= thr
-                    if active.sum() < 10:
-                        continue
-                    actual = y_val.values
-                    over_win = (edge > 0) & (actual > mkt_v)
-                    under_win = (edge < 0) & (actual < mkt_v)
-                    win = over_win | under_win
-                    wp = win[active].mean()
-                    roi = wp * (100.0 / 110.0) - (1.0 - wp)
-                    best_r = max(best_r, roi)
-                ou_roi = best_r if best_r > -1 else 0.0
-
-            combined = (
-                TOTAL_LOSS_MAE_WEIGHT * val_mae
-                - TOTAL_LOSS_OU_ROI_WEIGHT * ou_roi
-            )
+            # Proper-scoring only (Task multi-year calib): ROI reserved for
+            # policy_tuning gates, not Optuna model search.
+            combined = TOTAL_LOSS_MAE_WEIGHT * val_mae
             fold_scores.append(combined)
             fold_idx += 1
         return np.mean(fold_scores) if fold_scores else TUNING_INVALID_SCORE
 
     mode_label = "FAST" if fast_mode else "FULL"
     target_label = "residual" if use_market_residual else "absolute"
-    print(f"  ⏳ Total-model tuning ({mode_label}, {n_trials} trials, {target_label})...", flush=True)
+    print(f"  ⏳ Total-model tuning ({mode_label}, {n_trials} trials, {target_label}, MAE-only)...", flush=True)
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     best = study.best_params
@@ -1704,7 +1878,8 @@ class MetaTotalModel:
             cv=_stack_cv_splitter(use_purged_cv=True),
         )
         groups = _stack_fit_groups(df)
-        self.stack.fit(X_scaled, y_target, groups=groups)
+        sample_weight = _frame_recency_weights(df)
+        self.stack.fit(X_scaled, y_target, groups=groups, sample_weight=sample_weight)
 
         if self.use_quantile_heads:
             from sklearn.ensemble import GradientBoostingRegressor
@@ -1765,7 +1940,16 @@ class MetaTotalModel:
 
 
 class MetaScorePairModel:
-    """Independent home/away score regressors → total, margin, O/U distribution inputs."""
+    """Paired home/away score regressors trained on actual final points.
+
+    Canonical contract (see ``pipeline.score_targets``):
+    - Labels: ``actual_home``, ``actual_away`` only.
+    - Features: score-safe (no market/line columns).
+    - Derived: ``pred_margin = home - away``, ``pred_total = home + away``.
+    - Uncertainty: bivariate residual model with estimated correlation.
+    """
+
+    MODEL_SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -1776,12 +1960,27 @@ class MetaScorePairModel:
         train_target="absolute",
         use_quantile_heads=False,
         sigma_floor=8.0,
+        enforce_score_safe_features=True,
+        default_corr=None,
     ):
         self.ridge_alpha = ridge_alpha
         self.huber_epsilon = huber_epsilon
-        self.train_target = train_target
+        if train_target not in ("absolute",):
+            raise ValueError(
+                "MetaScorePairModel only supports train_target='absolute' "
+                "(actual home/away points). Market residuals are forbidden."
+            )
+        self.train_target = "absolute"
         self.use_quantile_heads = use_quantile_heads
         self.sigma_floor = sigma_floor
+        self.enforce_score_safe_features = bool(enforce_score_safe_features)
+        if default_corr is None:
+            try:
+                from pipeline.config import SCORE_PAIR_DEFAULT_CORR
+                default_corr = float(SCORE_PAIR_DEFAULT_CORR)
+            except Exception:
+                default_corr = 0.35
+        self.default_corr = float(default_corr)
         default_cb = {
             "depth": 4,
             "iterations": 300,
@@ -1803,11 +2002,21 @@ class MetaScorePairModel:
         self._rmse_home = float(sigma_floor)
         self._rmse_away = float(sigma_floor)
         self._rmse_total = float(sigma_floor) * np.sqrt(2.0)
+        self._rmse_margin = float(sigma_floor) * np.sqrt(2.0)
+        self._residual_corr = float(self.default_corr)
+        self._train_window = None
+        self.forecast_source = "score_pair"
 
     def _resolve_cols(self, df: pd.DataFrame) -> list[str]:
+        from pipeline.score_targets import filter_score_safe_features, score_safe_feature_cols
+
         if self.feature_cols:
-            return [c for c in self.feature_cols if c in df.columns]
-        return total_feature_cols(df)
+            cols = [c for c in self.feature_cols if c in df.columns]
+        else:
+            cols = score_safe_feature_cols(df)
+        if self.enforce_score_safe_features:
+            cols = filter_score_safe_features(cols, available=df.columns, enforce=True)
+        return cols
 
     def _make_stack(self):
         return ManualOOFStacker(
@@ -1820,16 +2029,25 @@ class MetaScorePairModel:
         )
 
     def fit(self, X_df, y_home=None, y_away=None, calib_df=None):
+        from pipeline.score_targets import SCORE_LABEL_COLS, joint_score_moments
+
         df = X_df.copy()
         if y_home is None:
             y_home = df["actual_home"] if "actual_home" in df.columns else None
         if y_away is None:
             y_away = df["actual_away"] if "actual_away" in df.columns else None
         if y_home is None or y_away is None:
-            raise ValueError("MetaScorePairModel requires actual_home/actual_away or y_home/y_away")
+            raise ValueError(
+                "MetaScorePairModel requires actual_home/actual_away "
+                f"(canonical labels {SCORE_LABEL_COLS}) or y_home/y_away"
+            )
         y_h = np.asarray(y_home, dtype=float)
         y_a = np.asarray(y_away, dtype=float)
+        if len(y_h) != len(df) or len(y_a) != len(df):
+            raise ValueError("y_home/y_away length must match X_df rows")
         cols = self._resolve_cols(df)
+        if not cols:
+            raise ValueError("MetaScorePairModel: no score-safe features available")
         self._fit_cols_ = cols
         X = df[cols].fillna(0)
         X_scaled = self.scaler.fit_transform(X)
@@ -1840,18 +2058,47 @@ class MetaScorePairModel:
         for stack, y in ((self.home_stack, y_h), (self.away_stack, y_a)):
             stack.fit(X_scaled, y, groups=groups)
 
-        # In-sample residual SD as initial sigma (overwritten by walk-forward when available)
-        pred_h = self.home_stack.predict(X_scaled)
-        pred_a = self.away_stack.predict(X_scaled)
-        self._rmse_home = float(max(self.sigma_floor, np.sqrt(np.mean((pred_h - y_h) ** 2))))
-        self._rmse_away = float(max(self.sigma_floor, np.sqrt(np.mean((pred_a - y_a) ** 2))))
-        pred_t = pred_h + pred_a
-        y_t = y_h + y_a
-        self._rmse_total = float(max(self.sigma_floor, np.sqrt(np.mean((pred_t - y_t) ** 2))))
+        pred_h = np.asarray(self.home_stack.predict(X_scaled), dtype=float)
+        pred_a = np.asarray(self.away_stack.predict(X_scaled), dtype=float)
+        resid_h = y_h - pred_h
+        resid_a = y_a - pred_a
+        self._rmse_home = float(max(self.sigma_floor, np.sqrt(np.mean(resid_h ** 2))))
+        self._rmse_away = float(max(self.sigma_floor, np.sqrt(np.mean(resid_a ** 2))))
+        if len(resid_h) >= 30 and np.std(resid_h) > 1e-9 and np.std(resid_a) > 1e-9:
+            corr = float(np.corrcoef(resid_h, resid_a)[0, 1])
+            if np.isfinite(corr):
+                self._residual_corr = float(np.clip(corr, -0.95, 0.95))
+            else:
+                self._residual_corr = float(self.default_corr)
+        else:
+            self._residual_corr = float(self.default_corr)
+        moments = joint_score_moments(self._rmse_home, self._rmse_away, self._residual_corr)
+        self._rmse_total = float(max(self.sigma_floor, moments["sigma_total"]))
+        self._rmse_margin = float(max(self.sigma_floor, moments["sigma_margin"]))
+        if "game_date" in df.columns and len(df):
+            try:
+                dates = pd.to_datetime(df["game_date"], errors="coerce")
+                self._train_window = {
+                    "n": int(len(df)),
+                    "start": str(dates.min().date()) if dates.notna().any() else None,
+                    "end": str(dates.max().date()) if dates.notna().any() else None,
+                }
+            except Exception:
+                self._train_window = {"n": int(len(df))}
+        else:
+            self._train_window = {"n": int(len(df))}
         self.fitted = True
         return self
 
     def predict_scores(self, feat_dict: dict) -> dict:
+        from pipeline.score_targets import (
+            assert_pair_algebra,
+            margin_home_cover_prob,
+            margin_win_prob,
+            score_predictive_intervals,
+            total_over_prob,
+        )
+
         if not self.fitted:
             raise RuntimeError("MetaScorePairModel must be fitted first.")
         row = pd.DataFrame([feat_dict])
@@ -1864,7 +2111,14 @@ class MetaScorePairModel:
         pred_away = float(self.away_stack.predict(X_scaled)[0])
         pred_total = pred_home + pred_away
         pred_margin = pred_home - pred_away
-        sigma_total = float(self._rmse_total)
+        assert_pair_algebra(pred_home, pred_away, pred_margin, pred_total)
+        intervals = score_predictive_intervals(
+            pred_home,
+            pred_away,
+            sigma_home=self._rmse_home,
+            sigma_away=self._rmse_away,
+            corr=self._residual_corr,
+        )
         out = {
             "pred_home": pred_home,
             "pred_away": pred_away,
@@ -1872,15 +2126,33 @@ class MetaScorePairModel:
             "pred_away_pts": pred_away,
             "pred_total": pred_total,
             "pred_margin": pred_margin,
-            "sigma_total": sigma_total,
-            "sigma_home": float(self._rmse_home),
-            "sigma_away": float(self._rmse_away),
+            "raw_pred_home": pred_home,
+            "raw_pred_away": pred_away,
+            "sigma_total": float(intervals["sigma_total"]),
+            "sigma_home": float(intervals["sigma_home"]),
+            "sigma_away": float(intervals["sigma_away"]),
+            "sigma_margin": float(intervals["sigma_margin"]),
+            "score_residual_corr": float(intervals["corr"]),
+            "score_residual_cov": float(intervals["cov"]),
+            "forecast_source": self.forecast_source,
+            "CONF_LOWER": float(intervals["CONF_LOWER"]),
+            "CONF_UPPER": float(intervals["CONF_UPPER"]),
+            "CONF_WIDTH": float(intervals["CONF_WIDTH"]),
+            "win_prob_margin": margin_win_prob(pred_margin, intervals["sigma_margin"]),
         }
+        for k, v in intervals.items():
+            if k.startswith(("home_q", "away_q", "margin_q", "total_q")):
+                out[k] = float(v)
+        # Market used only after score prediction for pricing probabilities.
         mkt = feat_dict.get("market_total")
         if mkt is not None and np.isfinite(float(mkt)):
-            from pipeline.market import total_over_prob_gaussian
-            out["p_over"] = total_over_prob_gaussian(pred_total, float(mkt), sigma_total)
+            out["p_over"] = total_over_prob(pred_total, float(mkt), out["sigma_total"])
             out["p_under"] = 1.0 - out["p_over"]
+        decision = feat_dict.get("decision_spread", feat_dict.get("market_spread"))
+        if decision is not None and np.isfinite(float(decision)):
+            out["home_cover_prob"] = margin_home_cover_prob(
+                pred_margin, float(decision), out["sigma_margin"],
+            )
         return out
 
     def _predict_raw_total(self, feat_dict: dict) -> dict:
@@ -1889,24 +2161,166 @@ class MetaScorePairModel:
     def predict_total(self, feat_dict: dict) -> float:
         return self.predict_scores(feat_dict)["pred_total"]
 
-    def set_walkforward_rmse(self, rmse_home=None, rmse_away=None, rmse_total=None):
+    def set_walkforward_rmse(self, rmse_home=None, rmse_away=None, rmse_total=None,
+                             rmse_margin=None, residual_corr=None):
         if rmse_home is not None and np.isfinite(rmse_home):
             self._rmse_home = float(max(self.sigma_floor, rmse_home))
         if rmse_away is not None and np.isfinite(rmse_away):
             self._rmse_away = float(max(self.sigma_floor, rmse_away))
+        if residual_corr is not None and np.isfinite(residual_corr):
+            self._residual_corr = float(np.clip(residual_corr, -0.95, 0.95))
+        from pipeline.score_targets import joint_score_moments
+        moments = joint_score_moments(self._rmse_home, self._rmse_away, self._residual_corr)
         if rmse_total is not None and np.isfinite(rmse_total):
             self._rmse_total = float(max(self.sigma_floor, rmse_total))
+        else:
+            self._rmse_total = float(max(self.sigma_floor, moments["sigma_total"]))
+        if rmse_margin is not None and np.isfinite(rmse_margin):
+            self._rmse_margin = float(max(self.sigma_floor, rmse_margin))
+        else:
+            self._rmse_margin = float(max(self.sigma_floor, moments["sigma_margin"]))
+
+    def metadata(self) -> dict:
+        return {
+            "schema_version": self.MODEL_SCHEMA_VERSION,
+            "forecast_source": self.forecast_source,
+            "train_target": self.train_target,
+            "feature_cols": list(self._fit_cols_),
+            "n_features": len(self._fit_cols_),
+            "sigma_home": self._rmse_home,
+            "sigma_away": self._rmse_away,
+            "sigma_margin": self._rmse_margin,
+            "sigma_total": self._rmse_total,
+            "residual_corr": self._residual_corr,
+            "train_window": self._train_window,
+            "enforce_score_safe_features": self.enforce_score_safe_features,
+        }
 
     def save(self, path):
         import pickle
+        payload = {"model": self, "metadata": self.metadata()}
         with open(path, "wb") as f:
-            pickle.dump(self, f)
+            pickle.dump(payload, f)
 
     @classmethod
     def load(cls, path):
         import pickle
         with open(path, "rb") as f:
-            return pickle.load(f)
+            obj = pickle.load(f)
+        if isinstance(obj, dict) and "model" in obj:
+            model = obj["model"]
+            meta = obj.get("metadata") or {}
+            # Fail closed on incompatible schema when present.
+            ver = int(meta.get("schema_version", getattr(model, "MODEL_SCHEMA_VERSION", 1)))
+            if ver > cls.MODEL_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"score_pair schema {ver} newer than loader {cls.MODEL_SCHEMA_VERSION}"
+                )
+            return model
+        return obj
+
+
+def _score_pair_tuning_objective(
+    trial,
+    df,
+    feature_cols,
+    season=None,
+    n_splits=3,
+):
+    """Paired-score CV loss: mean of home/away MAE (not ATS/ROI)."""
+    from sklearn.metrics import mean_absolute_error
+    from pipeline.score_targets import score_safe_feature_cols
+
+    ridge_alpha = trial.suggest_float("ridge_alpha", 1.0, 50.0, log=True)
+    depth = trial.suggest_int("depth", 3, 6)
+    iterations = trial.suggest_int("iterations", 150, 400)
+    learning_rate = trial.suggest_float("learning_rate", 0.02, 0.12, log=True)
+    huber_epsilon = trial.suggest_float("huber_epsilon", 1.1, 1.8)
+
+    cols = feature_cols or score_safe_feature_cols(df)
+    y_h = df["actual_home"].values.astype(float)
+    y_a = df["actual_away"].values.astype(float)
+    groups = _stack_fit_groups(df)
+    splitter = _stack_cv_splitter(use_purged_cv=True)
+    # ManualOOFStacker uses GroupKFold-like splits via groups
+    from sklearn.model_selection import GroupKFold
+    n = min(n_splits, max(2, len(np.unique(groups)) if groups is not None else n_splits))
+    cv = GroupKFold(n_splits=n)
+    maes = []
+    X = df[cols].fillna(0).values
+    for tr, va in cv.split(X, y_h, groups=groups):
+        model = MetaScorePairModel(
+            ridge_alpha=ridge_alpha,
+            cb_params={
+                "depth": depth,
+                "iterations": iterations,
+                "learning_rate": learning_rate,
+                "verbose": 0,
+                "random_seed": 42,
+                "thread_count": 1,
+                "allow_writing_files": False,
+            },
+            huber_epsilon=huber_epsilon,
+            feature_cols=cols,
+            enforce_score_safe_features=True,
+        )
+        model.fit(df.iloc[tr], y_home=y_h[tr], y_away=y_a[tr])
+        preds_h, preds_a = [], []
+        for i in va:
+            out = model.predict_scores(df.iloc[i].to_dict())
+            preds_h.append(out["pred_home"])
+            preds_a.append(out["pred_away"])
+        mae = 0.5 * (
+            mean_absolute_error(y_h[va], preds_h)
+            + mean_absolute_error(y_a[va], preds_a)
+        )
+        maes.append(mae)
+    return float(np.mean(maes)) if maes else 1e9
+
+
+def tune_score_pair_model(
+    df,
+    n_trials=20,
+    season=None,
+    feature_cols=None,
+    fast_mode=False,
+):
+    """Chronological past-only Optuna tuning for MetaScorePairModel."""
+    import optuna
+    from pipeline.score_targets import score_safe_feature_cols
+
+    if "actual_home" not in df.columns or "actual_away" not in df.columns:
+        raise ValueError("tune_score_pair_model requires actual_home/actual_away")
+    cols = feature_cols or score_safe_feature_cols(df)
+    if fast_mode:
+        n_trials = min(n_trials, 8)
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="minimize")
+    study.optimize(
+        lambda trial: _score_pair_tuning_objective(
+            trial, df, cols, season=season, n_splits=2 if fast_mode else 3,
+        ),
+        n_trials=n_trials,
+        show_progress_bar=False,
+    )
+    best = study.best_params
+    return {
+        "ridge_alpha": best.get("ridge_alpha", 10.0),
+        "huber_epsilon": best.get("huber_epsilon", 1.35),
+        "cb_params": {
+            "depth": best.get("depth", 4),
+            "iterations": best.get("iterations", 300),
+            "learning_rate": best.get("learning_rate", 0.05),
+            "verbose": 0,
+            "random_seed": 42,
+            "thread_count": 1,
+            "allow_writing_files": False,
+        },
+        "feature_cols": cols,
+        "train_target": "absolute",
+        "best_value": float(study.best_value),
+    }
+
 
 
 def _meta_win_tuning_objective(
@@ -1968,37 +2382,10 @@ def _meta_win_tuning_objective(
         brier = brier_score_loss(y_val, p_val)
         ece = compute_ece(y_val.values, p_val)
 
-        ml_roi = 0.0
-        if "market_ml" in val_df.columns:
-            from pipeline.market import fair_home_win_prob
-            best_r = -1.0
-            for ev_thr in (0.03, 0.05, 0.08, 0.10):
-                rois = []
-                for idx, row in val_df.iterrows():
-                    mkt_ml = row.get("market_ml")
-                    if mkt_ml is None or pd.isna(mkt_ml):
-                        continue
-                    i_loc = val_df.index.get_loc(idx)
-                    p = float(p_val[i_loc])
-                    fair = fair_home_win_prob(float(mkt_ml))
-                    if fair is None:
-                        continue
-                    ev_home = p - fair
-                    ev_away = (1 - p) - (1 - fair)
-                    if ev_home >= ev_thr and p >= 0.5:
-                        rois.append(float(y_val.loc[idx]))
-                    elif ev_away >= ev_thr and p < 0.5:
-                        rois.append(float(1 - y_val.loc[idx]))
-                if len(rois) >= 10:
-                    wp = np.mean(rois)
-                    roi = wp * (100.0 / 110.0) - (1.0 - wp)
-                    best_r = max(best_r, roi)
-            ml_roi = best_r if best_r > -1 else 0.0
-
+        # Proper-scoring only: ML ROI is reserved for policy_tuning gates.
         combined = (
             META_WIN_LOSS_BRIER_WEIGHT * brier
             + META_WIN_LOSS_ECE_WEIGHT * (ece if np.isfinite(ece) else 0.0)
-            - META_WIN_LOSS_ML_ROI_WEIGHT * ml_roi
         )
         scores.append(combined)
     return np.mean(scores) if scores else TUNING_INVALID_SCORE
@@ -2101,12 +2488,25 @@ class MetaWinModel:
             X = X.copy()
             X['meta_pred_margin'] = X_df[pred_margin_col].fillna(0)
         X_scaled = self.scaler.fit_transform(X)
-        self.model.fit(X_scaled, y_win.astype(int))
+        sw = _frame_recency_weights(X_df)
+        if sw is not None:
+            try:
+                self.model.fit(X_scaled, y_win.astype(int), sample_weight=sw)
+            except TypeError:
+                self.model.fit(X_scaled, y_win.astype(int))
+        else:
+            self.model.fit(X_scaled, y_win.astype(int))
 
         Xe = self._elo_matrix(X_df)
         if Xe is not None and Xe.shape[1] > 0:
             Xe_s = self.elo_scaler.fit_transform(Xe)
-            self.elo_model.fit(Xe_s, y_win.astype(int))
+            if sw is not None:
+                try:
+                    self.elo_model.fit(Xe_s, y_win.astype(int), sample_weight=sw)
+                except TypeError:
+                    self.elo_model.fit(Xe_s, y_win.astype(int))
+            else:
+                self.elo_model.fit(Xe_s, y_win.astype(int))
             self.elo_fitted = True
 
         if calib_df is not None and self.calib_method != "none":

@@ -1,4 +1,8 @@
-"""Central routing for cover/win probability sources (legacy vs simplified)."""
+"""Central routing for cover/win probability sources (legacy vs simplified).
+
+Canonical ATS probability is P(home covers vs the T-60 decision line).
+Chosen-side probability is derived exactly once via ``ats_ev.cover_prob_for_side``.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -18,18 +22,25 @@ def select_cover_prob(
     ats_classifier_prob: float | None = None,
     blend_weight: float = 0.5,
 ) -> float:
+    """Select the side-specific cover probability used for stakes/gates.
+
+    ``ats_classifier_prob`` must already be converted to the chosen side
+    (never pass raw home-cover here without ``cover_prob_for_side``).
+    In ``beta_ats`` mode, fail closed to the margin/raw path when the
+    classifier probability is missing.
+    """
     mode = mode or CALIBRATION_MODE
     if mode == "simplified":
         base = float(raw_cover)
-    elif mode == "beta_ats" and ats_classifier_prob is not None:
-        base = float(ats_classifier_prob)
+    elif mode == "beta_ats":
+        if ats_classifier_prob is not None and np.isfinite(float(ats_classifier_prob)):
+            base = float(ats_classifier_prob)
+        else:
+            # Fail closed: no classifier → margin/raw path, not a silent default.
+            base = float(raw_cover)
     else:
         base = float(calibrated_cover)
-    if ats_classifier_prob is not None and mode in ("beta_ats",) and CALIBRATION_MODE != "legacy_stack":
-        return base
-    if ats_classifier_prob is not None and mode == "legacy_stack":
-        return base
-    return base
+    return float(np.clip(base, 0.01, 0.99))
 
 
 def blend_ats_classifier_cover(
@@ -37,6 +48,7 @@ def blend_ats_classifier_cover(
     ats_prob: float | None,
     blend: float = 0.5,
 ) -> float:
+    """Blend margin-based and classifier side-cover probabilities."""
     if ats_prob is None or not np.isfinite(ats_prob):
         return float(spread_cover)
     w = float(np.clip(blend, 0.0, 1.0))
@@ -61,7 +73,6 @@ def resolve_win_prob(
             source = "margin_isotonic"
 
     if source == "meta_win" and win_model is not None and getattr(win_model, "fitted", False):
-        from pipeline.model import build_feature_row
         raise RuntimeError("resolve_win_prob expects precomputed win_model output at call site")
 
     if source == "rolling_platt" and calibrator is not None:

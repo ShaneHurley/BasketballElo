@@ -71,6 +71,10 @@ def build_game_features(
     ref_tracker=None,
     shot_quality_tracker=None,
     hapm_tracker=None,
+    league_rolling_stats=None,
+    hierarchical_pace=None,
+    hier_shot_rates=None,
+    minutes_model=None,
     last_date=None,
     team_game_dates=None,
     team_recent_net=None,
@@ -106,7 +110,10 @@ def build_game_features(
     if coerced is not None:
         gdate = coerced
     elif not is_valid_timestamp(gdate):
-        gdate = pd.Timestamp.now().normalize()
+        raise ValueError(
+            f"Unresolved game_date for GAME_ID={game_id!r}: {gdate!r}. "
+            "T-60 features fail closed — never invent pd.Timestamp.now()."
+        )
     else:
         gdate = pd.Timestamp(gdate).normalize()
 
@@ -183,6 +190,27 @@ def build_game_features(
         h_roll_off = h_roll_def = a_roll_off = a_roll_def = DEFAULT_LEAGUE_XPPP
 
     pred_poss = pace_tracker.get_expected_pace(home_team, away_team)
+    pace_dist = {
+        "pace_mean": pred_poss, "pace_var": 9.0, "pace_std": 3.0,
+        "pace_q10": pred_poss - 4.0, "pace_q50": pred_poss, "pace_q90": pred_poss + 4.0,
+        "pace_baseline": pred_poss, "pace_eff_n": 0.0,
+    }
+    try:
+        from pipeline.config import USE_HIERARCHICAL_PACE
+        if USE_HIERARCHICAL_PACE and hierarchical_pace is not None:
+            fc = hierarchical_pace.predict(
+                home_team, away_team,
+                is_altitude=home_team in ALTITUDE_TEAMS,
+                rest_diff=float(h_rest - a_rest),
+            )
+            pred_poss = fc.mean
+            pace_dist = fc.as_feature_dict()
+        elif hasattr(pace_tracker, "get_expected_pace_distribution"):
+            pace_dist = pace_tracker.get_expected_pace_distribution(home_team, away_team)
+            pace_dist.setdefault("pace_baseline", pred_poss)
+            pace_dist.setdefault("pace_eff_n", 0.0)
+    except Exception:
+        pass
     h_pace = pace_tracker.get_team_pace(home_team) if hasattr(pace_tracker, "get_team_pace") else pred_poss
     a_pace = pace_tracker.get_team_pace(away_team) if hasattr(pace_tracker, "get_team_pace") else pred_poss
     pace_diff = h_pace - a_pace
@@ -205,10 +233,25 @@ def build_game_features(
     go = get_game_odds(gdate, home_team, odds_dict) if odds_dict else {}
     market_spread = go.get("spread", np.nan)
     market_ml = go.get("ml", np.nan)
-    market_fair_win_prob = fair_home_win_prob(market_ml) if pd.notna(market_ml) else 0.5
+    market_ml_away = go.get("ml_away", np.nan)
+    market_fair_win_prob = (
+        fair_home_win_prob(market_ml, market_ml_away) if pd.notna(market_ml) else 0.5
+    )
     market_total = go.get("total", np.nan)
     closing_spread = go.get("closing_spread", market_spread)
-    market_total_minus_league = float(market_total) - LEAGUE_AVG_TOTAL if pd.notna(market_total) else 0.0
+    decision_spread = go.get("decision_spread", market_spread)
+    market_total_missing = int(
+        pd.isna(market_total) or (isinstance(market_total, (int, float)) and float(market_total) <= 0)
+    )
+    if market_total_missing:
+        market_total = np.nan
+        market_total_minus_league = np.nan
+    else:
+        market_total_minus_league = float(market_total) - LEAGUE_AVG_TOTAL
+    spread_away_price = go.get("spread_away_price", np.nan)
+    spread_home_price = go.get("spread_home_price", np.nan)
+    total_over_price = go.get("total_over_price", np.nan)
+    total_under_price = go.get("total_under_price", np.nan)
     spread_move = go.get("spread_move", 0.0) if pd.notna(go.get("spread_move", np.nan)) else 0.0
     public_home_pct = go.get("public_home_pct", 0.0) if pd.notna(go.get("public_home_pct", np.nan)) else 0.0
     micro = market_microstructure_features(spread_move, public_home_pct, market_spread)
@@ -241,6 +284,37 @@ def build_game_features(
     elo_margin, hier_margin = engine_implied_margins(
         elo_tracker, hier_engine, ho_off, ho_def, ao_off, ao_def,
         home_lineup, away_lineup, pred_poss)
+
+    # Canonical offense-vs-defense matchup layer (T-60 Phase 2).
+    # Reuse already-computed lineup Elos — do not re-query the tracker.
+    from pipeline.matchup_rating import forecast_from_lineup_elos
+    matchup_degraded = 0
+    try:
+        matchup_fc = forecast_from_lineup_elos(
+            ho_off, ho_def, ao_off, ao_def, pred_poss,
+            home_unc=h_o_rd + h_d_rd,
+            away_unc=a_o_rd + a_d_rd,
+        )
+        matchup_feats = matchup_fc.as_feature_dict()
+        matchup_feats["matchup_degraded"] = 0
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("matchup forecast degraded: %s", exc)
+        matchup_degraded = 1
+        matchup_feats = {
+            "matchup_home_pp100": np.nan,
+            "matchup_away_pp100": np.nan,
+            "matchup_margin": float(elo_margin),
+            "matchup_total": np.nan,
+            "matchup_home_pts": np.nan,
+            "matchup_away_pts": np.nan,
+            "matchup_uncertainty": (h_o_rd + h_d_rd + a_o_rd + a_d_rd) / 2.0,
+            "matchup_home_offense_pp100": np.nan,
+            "matchup_away_offense_pp100": np.nan,
+            "matchup_off_vs_def_home": np.nan,
+            "matchup_off_vs_def_away": np.nan,
+            "matchup_degraded": 1,
+        }
 
     h_luck, h_defev, h_tov = elo_tracker.lineup_rolling_rates(home_lineup, h_weights or None)
     a_luck, a_defev, a_tov = elo_tracker.lineup_rolling_rates(away_lineup, a_weights or None)
@@ -305,18 +379,33 @@ def build_game_features(
         "a_roll_off_xppp": a_roll_off, "a_roll_def_xppp": a_roll_def,
         "roll_net_xppp": (h_roll_off - a_roll_def) - (a_roll_off - h_roll_def),
         "market_spread": market_spread, "market_ml": market_ml,
+        "market_ml_away": market_ml_away,
+        "spread_home_price": spread_home_price,
+        "spread_away_price": spread_away_price,
+        "total_over_price": total_over_price,
+        "total_under_price": total_under_price,
         "market_fair_win_prob": market_fair_win_prob,
         "closing_spread": closing_spread,
-        "market_total": market_total if pd.notna(market_total) else 0.0,
+        "decision_spread": decision_spread,
+        "market_total": market_total,  # NaN when missing — never 0.0 sentinel
+        "market_total_missing": market_total_missing,
         "market_total_minus_league": market_total_minus_league,
         "spread_move": spread_move, "public_home_pct": public_home_pct,
         "h_recent_net": h_recent, "a_recent_net": a_recent, "recent_diff": h_recent - a_recent,
         "pace_diff": pace_diff, "pace_abs_diff": abs(pace_diff),
         "pace_interaction": pace_diff * ((ho_off - ao_def) - (ao_off - ho_def)),
         "h_pace": float(h_pace), "a_pace": float(a_pace),
+        "pace_mean": float(pace_dist.get("pace_mean", pred_poss)),
+        "pace_var": float(pace_dist.get("pace_var", 9.0)),
+        "pace_std": float(pace_dist.get("pace_std", 3.0)),
+        "pace_q10": float(pace_dist.get("pace_q10", pred_poss - 4)),
+        "pace_q90": float(pace_dist.get("pace_q90", pred_poss + 4)),
+        "pace_baseline": float(pace_dist.get("pace_baseline", pred_poss)),
+        "pace_eff_n": float(pace_dist.get("pace_eff_n", 0.0)),
         "h_sos": h_sos, "a_sos": a_sos, "sos_diff": h_sos - a_sos,
         "h_home_edge": h_home_edge, "a_road_edge": a_road_edge,
         "hca_net": h_home_edge - a_road_edge,
+        **matchup_feats,
         **form_feats,
         **micro,
     }
@@ -334,6 +423,7 @@ def build_game_features(
             lineup5_net=lineup5_net,
             chem_duo_net=chem_feats.get("h_chem_duo_net", 0.0),
             chem_trio_net=chem_feats.get("h_chem_trio_net", 0.0),
+            lineup5_sample_poss=feat.get("lineup5_sample_min", 0.0),
         )
         feat["a_lineup_composite"] = composite_lineup_rating(
             player_off_delta=ao_off - ho_def,
@@ -341,10 +431,52 @@ def build_game_features(
             lineup5_net=-lineup5_net,
             chem_duo_net=chem_feats.get("a_chem_duo_net", 0.0),
             chem_trio_net=chem_feats.get("a_chem_trio_net", 0.0),
+            lineup5_sample_poss=feat.get("lineup5_sample_min", 0.0),
         )
         feat["lineup_composite_diff"] = feat["h_lineup_composite"] - feat["a_lineup_composite"]
     if shot_quality_tracker is not None:
         feat.update(shot_quality_tracker.feature_dict(home_team, away_team, current_season, gdate))
+    try:
+        from pipeline.config import USE_HIERARCHICAL_SHOT_ZONES, USE_STRUCTURED_SCORE_FEATURES
+        if USE_HIERARCHICAL_SHOT_ZONES and hier_shot_rates is not None:
+            feat.update(hier_shot_rates.feature_dict(home_team, away_team))
+        if USE_STRUCTURED_SCORE_FEATURES:
+            from pipeline.structured_score import structured_score_from_pace_pps
+            h_pps = float(feat.get("h_hier_shot_pps", feat.get("h_xefg", 0.54) * 2.05))
+            a_pps = float(feat.get("a_hier_shot_pps", feat.get("a_xefg", 0.54) * 2.05))
+            # Convert xEFG-ish to PPP-ish if still below 0.8
+            if h_pps < 0.8:
+                h_pps = 1.05 + (h_pps - 0.54) * 0.5
+            if a_pps < 0.8:
+                a_pps = 1.05 + (a_pps - 0.54) * 0.5
+            struct = structured_score_from_pace_pps(
+                exp_poss=pred_poss,
+                home_pps=h_pps,
+                away_pps=a_pps,
+                pace_var=float(feat.get("pace_var", 9.0)),
+            )
+            feat.update(struct.as_feature_dict())
+    except Exception:
+        pass
+    if minutes_model is not None:
+        try:
+            h_roster = list(home_lineup) if home_lineup else list(home_starters)
+            a_roster = list(away_lineup) if away_lineup else list(away_starters)
+            h_mins = minutes_model.forecast_team(h_roster) if h_roster else {}
+            a_mins = minutes_model.forecast_team(a_roster) if a_roster else {}
+            feat["h_proj_starter_minutes"] = float(sum(
+                v for k, v in h_mins.items() if k != "_replacement"
+            ))
+            feat["a_proj_starter_minutes"] = float(sum(
+                v for k, v in a_mins.items() if k != "_replacement"
+            ))
+            feat["h_replacement_minutes"] = float(h_mins.get("_replacement", 0.0))
+            feat["a_replacement_minutes"] = float(a_mins.get("_replacement", 0.0))
+            feat["minutes_cold_start"] = float(
+                1.0 if (not h_roster or not a_roster) else 0.0
+            )
+        except Exception:
+            feat.setdefault("minutes_cold_start", 1.0)
     if hapm_tracker is not None and getattr(hapm_tracker, "fitted", False):
         feat.update(hapm_tracker.feature_dict(home_lineup, away_lineup, game_id=game_id))
     else:
@@ -399,5 +531,27 @@ def build_game_features(
         feat.update(ref_tracker.features(crew_id))
     else:
         feat.update({"ref_pace_bias": 0.0, "ref_foul_bias": 0.0})
+
+    from pipeline.config import USE_ROLLING_LEAGUE_Z
+    if USE_ROLLING_LEAGUE_Z and league_rolling_stats is not None:
+        feat.update(league_rolling_stats.feature_dict(feat))
+
+    # Serve-time shared-forecast parity columns (not OOF; live snapshot only).
+    from pipeline.shared_forecast import emit_shared_forecast_from_feature_row
+    preds_proxy = {
+        "pred_home": feat.get("matchup_home_pts"),
+        "pred_away": feat.get("matchup_away_pts"),
+        "pred_margin": feat.get("matchup_margin", feat.get("elo_margin")),
+        "pred_total": feat.get("matchup_total"),
+        "sigma_margin": max(float(feat.get("matchup_uncertainty", 350) or 350) / 50.0, 4.0),
+    }
+    feat.update(emit_shared_forecast_from_feature_row(feat, preds_proxy))
+    feat["matchup_degraded"] = int(matchup_degraded)
+
+    # Fail closed: evaluation-only close_* must never enter T-60 features.
+    # Note: closing_spread / decision_spread are explicit market columns (not
+    # the close_* evaluation namespace from market_snapshots).
+    from pipeline.market_snapshots import assert_no_close_leak
+    assert_no_close_leak(feat.keys())
 
     return augment_elo_features(feat, elo_calibrator)

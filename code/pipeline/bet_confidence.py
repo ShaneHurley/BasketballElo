@@ -56,7 +56,29 @@ DEFAULT_CONFIDENCE_WEIGHTS: dict[str, float] = {
 }
 
 # Wide multiplicative search bounds (× default) for Phase 2a first-year tuning.
-DEFAULT_WEIGHT_SEARCH_MULT = (0.25, 4.0)
+DEFAULT_WEIGHT_SEARCH_MULT = (0.25, 2.5)
+
+
+def clamp_confidence_weights(weights: dict[str, float]) -> dict[str, float]:
+    """Clamp Phase 2a weights to absolute bounds (blocks cover_scale explosions)."""
+    from pipeline.config import CONFIDENCE_WEIGHT_ABS_BOUNDS
+
+    out = dict(DEFAULT_CONFIDENCE_WEIGHTS)
+    out.update(weights or {})
+    bounds = CONFIDENCE_WEIGHT_ABS_BOUNDS or {}
+    for k, v in list(out.items()):
+        if k not in DEFAULT_CONFIDENCE_WEIGHTS:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            fv = float(DEFAULT_CONFIDENCE_WEIGHTS[k])
+        if k in bounds:
+            lo, hi = bounds[k]
+            fv = float(np.clip(fv, float(lo), float(hi)))
+        out[k] = fv
+    return out
+
 
 # Order for logistic_features / logistic_isotonic calibration vector.
 # All features are oriented so higher → historically better ATS cover rate.
@@ -174,9 +196,12 @@ def weight_search_ranges(
     wide_mult: tuple[float, float] = DEFAULT_WEIGHT_SEARCH_MULT,
 ) -> dict[str, tuple[float, float]]:
     """Per-variable (lo, hi) bounds; shrink toward center each tuning year."""
-    center = center or DEFAULT_CONFIDENCE_WEIGHTS
+    from pipeline.config import CONFIDENCE_WEIGHT_ABS_BOUNDS
+
+    center = clamp_confidence_weights(center or DEFAULT_CONFIDENCE_WEIGHTS)
     shrink = float(np.clip(shrink, 0.05, 1.0))
     lo_mult, hi_mult = wide_mult
+    abs_bounds = CONFIDENCE_WEIGHT_ABS_BOUNDS or {}
     ranges: dict[str, tuple[float, float]] = {}
     for key, default in DEFAULT_CONFIDENCE_WEIGHTS.items():
         c = float(center.get(key, default))
@@ -193,6 +218,10 @@ def weight_search_ranges(
             ranges[key] = (max(18.0, c - 6.0 * shrink), min(36.0, c + 6.0 * shrink))
         else:
             ranges[key] = (min(wlo, whi), max(wlo, whi))
+        if key in abs_bounds:
+            alo, ahi = abs_bounds[key]
+            lo, hi = ranges[key]
+            ranges[key] = (max(float(alo), float(lo)), min(float(ahi), float(hi)))
     edge_floor = 0.5 * float(DEFAULT_CONFIDENCE_WEIGHTS["edge_slope"])
     lo, hi = ranges["edge_slope"]
     ranges["edge_slope"] = (max(lo, edge_floor), hi)
@@ -218,7 +247,7 @@ def sample_weight_candidates(
             w[k] = float(rng.uniform(lo, hi))
         edge_floor = 0.5 * float(DEFAULT_CONFIDENCE_WEIGHTS["edge_slope"])
         w["edge_slope"] = max(w["edge_slope"], edge_floor)
-        out.append(w)
+        out.append(clamp_confidence_weights(w))
     return out
 
 
@@ -232,7 +261,7 @@ def shrink_weight_center(
     merged.update(center)
     for k in DEFAULT_CONFIDENCE_WEIGHTS:
         merged[k] = float((1.0 - alpha) * merged[k] + alpha * best.get(k, merged[k]))
-    return merged
+    return clamp_confidence_weights(merged)
 
 
 def bucket_lift_map(rates: dict[str, float], breakeven: float = 110.0 / 210.0) -> dict[str, float]:
@@ -394,11 +423,13 @@ class WalkForwardBetCalibrator:
 
     def __init__(self, method: str | None = None, confidence_weights: dict[str, float] | None = None,
                  logistic_c: float = 0.1):
-        self.method = method or CONFIDENCE_CALIB_METHOD
+        raw = method or CONFIDENCE_CALIB_METHOD
+        # "auto" is resolved in fit_walkforward_confidence_calibrator; default fit path uses logistic_features.
+        self.method = "logistic_features" if str(raw).lower() == "auto" else raw
         self.logistic_c = float(logistic_c)
-        self.confidence_weights = dict(DEFAULT_CONFIDENCE_WEIGHTS)
-        if confidence_weights:
-            self.confidence_weights.update(confidence_weights)
+        self.confidence_weights = clamp_confidence_weights(
+            confidence_weights or DEFAULT_CONFIDENCE_WEIGHTS
+        )
         self.models: dict[str, object | None] = {"ats": None, "ml": None, "ou": None}
         self.scalers: dict[str, StandardScaler | None] = {"ats": None, "ml": None, "ou": None}
         self.bucket_lifts: dict[str, float] = dict(DEFAULT_BUCKET_ATS_LIFT)
@@ -410,7 +441,11 @@ class WalkForwardBetCalibrator:
 
     @staticmethod
     def _ats_outcome(row) -> float | None:
-        if pd.isna(row.get("MARKET_SPREAD")):
+        # Prefer T-60 decision spread for calibration labels (not closing/legacy market).
+        spread = row.get("DECISION_SPREAD", row.get("decision_spread"))
+        if spread is None or (isinstance(spread, float) and pd.isna(spread)):
+            spread = row.get("MARKET_SPREAD", row.get("market_spread"))
+        if spread is None or pd.isna(spread):
             return None
         direction = row.get("DIRECTION", row.get("EDGE_LEAN", "Pass"))
         edge = float(row.get("EDGE", row.get("spread_edge_pts", 0)) or 0)
@@ -418,7 +453,7 @@ class WalkForwardBetCalibrator:
             if abs(edge) < 1e-9:
                 return None
             direction = "Home" if edge > 0 else "Away"
-        cover = row["ACTUAL_MARGIN"] + row["MARKET_SPREAD"]
+        cover = float(row["ACTUAL_MARGIN"]) + float(spread)
         if cover == 0:
             return None
         home = direction == "Home"
@@ -495,7 +530,10 @@ class WalkForwardBetCalibrator:
                 pred, mkt, r.get("elo_margin_calibrated", r.get("ELO_MARGIN_CALIBRATED")),
             )
         if "SPREAD_COVER_PROB" not in r or pd.isna(r.get("SPREAD_COVER_PROB")):
-            r["SPREAD_COVER_PROB"] = spread_cover_prob(pred, mkt, cw, direction=direction)
+            r["SPREAD_COVER_PROB"] = spread_cover_prob(
+                pred, mkt, cw, direction=direction,
+                matchup_vol_sigma=r.get("MATCHUP_VOL_SIGMA", r.get("matchup_vol_sigma")),
+            )
         return r
 
     def _fit_calibrator(self, bet_type: str, scores: np.ndarray, outcomes: np.ndarray,
@@ -555,7 +593,10 @@ class WalkForwardBetCalibrator:
             return self
 
         if confidence_weights:
-            self.confidence_weights.update(confidence_weights)
+            self.confidence_weights = clamp_confidence_weights({
+                **self.confidence_weights,
+                **confidence_weights,
+            })
 
         calib_df = self._calibration_frame(prior_df, scope=scope)
         if calib_df.empty:
@@ -638,22 +679,102 @@ class WalkForwardBetCalibrator:
 
         return _heuristic_calibrated_prob(raw_score, raw_cover)
 
+    def _predict_rank_prob(self, bet_type: str, raw_score: float, features: dict) -> float:
+        """Continuous ranking probability — logistic / heuristic, never isotonic clumps."""
+        feat = features if "abs_edge" in features else features
+        raw_cover = float(
+            feat.get("spread_cover_prob", feat.get("SPREAD_COVER_PROB", 0.5)) or 0.5
+        )
+        method = getattr(self, "_calib_method_ats", self.method) or self.method
+        model = self.models.get(bet_type)
+
+        if method in ("logistic_features", "logistic_isotonic") and bet_type == "ats":
+            scaler = self.scalers.get(bet_type)
+            if scaler is not None and model is not None:
+                vec = build_calibrated_feature_vector(
+                    feat,
+                    weights=self.confidence_weights,
+                    bucket_lifts=self.bucket_lifts,
+                ).reshape(1, -1)
+                x = scaler.transform(vec)
+                logit_model = model["logistic"] if isinstance(model, dict) else model
+                if hasattr(logit_model, "predict_proba"):
+                    return float(np.clip(logit_model.predict_proba(x)[0, 1], 0.01, 0.99))
+
+        if method in ("platt",) or isinstance(model, LogisticRegression):
+            if model is not None and hasattr(model, "predict_proba"):
+                return float(np.clip(
+                    model.predict_proba(np.array([[raw_score]], dtype=float))[0, 1],
+                    0.01, 0.99,
+                ))
+
+        return _heuristic_calibrated_prob(raw_score, raw_cover)
+
     def predict(self, bet_type: str, features: dict, direction: str = "Home") -> dict:
         if bet_type == "ats":
             feat = build_confidence_features(**features) if "abs_edge" not in features else features
             score = ats_confidence_score(feat, self.bucket_lifts, self.confidence_weights)
         else:
             score = self._build_score(features, bet_type)
+            feat = features
 
-        prob = self._predict_prob(bet_type, score, features)
-        prob = float(np.clip(prob, 0.01, 0.99))
+        # Stake/ECE path: season-picked calibrator (may be isotonic) + cap.
+        prob = self._predict_prob(bet_type, score, features if bet_type != "ats" else feat)
+        # Ranking path: continuous logistic/heuristic → CONFIDENCE score.
+        rank_p = self._predict_rank_prob(bet_type, score, feat if bet_type == "ats" else features)
+
+        if bet_type == "ats":
+            from pipeline.config import (
+                CONFIDENCE_PROB_TEMPERATURE,
+                COVER_PROB_CAP_HI,
+                COVER_PROB_CAP_LO,
+            )
+            temp = float(CONFIDENCE_PROB_TEMPERATURE or 1.0)
+            if temp > 1.0 and 0.0 < prob < 1.0:
+                logit = np.log(prob / (1.0 - prob))
+                prob = float(1.0 / (1.0 + np.exp(-logit / temp)))
+            lo = float(COVER_PROB_CAP_LO) if COVER_PROB_CAP_LO is not None else 0.01
+            hi = float(COVER_PROB_CAP_HI) if COVER_PROB_CAP_HI is not None else 0.99
+            try:
+                from pipeline.market import dampen_cover_for_upset
+                prob = dampen_cover_for_upset(
+                    prob,
+                    direction=direction,
+                    market_spread=feat.get("market_spread", feat.get("MARKET_SPREAD")),
+                    upset_prob=feat.get("upset_prob"),
+                )
+            except Exception:
+                pass
+            prob = float(np.clip(prob, lo, hi))
+            if temp > 1.0 and 0.0 < rank_p < 1.0:
+                rlogit = np.log(rank_p / (1.0 - rank_p))
+                rank_p = float(1.0 / (1.0 + np.exp(-rlogit / temp)))
+            rank_p = float(np.clip(rank_p, 0.01, 0.99))
+        else:
+            prob = float(np.clip(prob, 0.01, 0.99))
+            rank_p = float(np.clip(rank_p, 0.01, 0.99))
+
+        # Continuous 0–100 ranking score (not isotonic-quantized cover%).
+        conf_score = float(rank_p * 100.0)
+        try:
+            from pipeline.config import CONFIDENCE_SCORE_SOFT_MAX
+            soft_max = CONFIDENCE_SCORE_SOFT_MAX
+            if soft_max is not None and conf_score > float(soft_max):
+                over = conf_score - float(soft_max)
+                conf_score = float(soft_max) + 0.35 * over
+                conf_score = min(99.0, conf_score)
+        except Exception:
+            pass
+        conf_score_int = int(round(conf_score))
         tier = _tier_from_prob(prob)
         return {
             "calibrated_prob": prob,
-            "confidence_score": int(round(prob * 100)),
+            "confidence_score": conf_score_int,
+            "confidence_score_continuous": conf_score,
             "confidence_tier": tier,
             "stars": _stars_from_tier(tier, direction),
             "confidence_score_raw": score,
+            "rank_prob": rank_p,
         }
 
     def venn_abers_width(self, score: float) -> float | None:
@@ -687,14 +808,33 @@ def _ats_roi_from_outcomes(outcomes: np.ndarray) -> float:
 
 
 def _confidence_training_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Rows eligible for confidence calibration / threshold tuning (|edge| floor)."""
+    """Gate-eligible rows for confidence calibration (|edge| + avoid bands)."""
     if df is None or df.empty:
         return pd.DataFrame()
+    from pipeline.bet_selection import passes_edge_avoid_band
+    from pipeline.config import MIN_EDGE_BUCKET
+
     m = df.copy()
     if "EDGE" not in m.columns:
         return m
-    edge = pd.to_numeric(m["EDGE"], errors="coerce").fillna(0).abs()
-    return m[edge >= float(CONFIDENCE_MIN_EDGE)].copy()
+    edge = pd.to_numeric(m["EDGE"], errors="coerce").fillna(0)
+    abs_edge = edge.abs()
+    floor = float(max(float(CONFIDENCE_MIN_EDGE), float(MIN_EDGE_BUCKET)))
+    m = m[abs_edge >= floor].copy()
+    if m.empty:
+        return m
+    agree = m.get("ELO_META_AGREEMENT")
+    keep = []
+    for i, row in m.iterrows():
+        ae = float(abs(float(row.get("EDGE", 0) or 0)))
+        ag = None
+        if agree is not None:
+            try:
+                ag = float(row.get("ELO_META_AGREEMENT"))
+            except (TypeError, ValueError):
+                ag = None
+        keep.append(passes_edge_avoid_band(ae, elo_meta_agreement=ag))
+    return m.loc[np.asarray(keep, dtype=bool)].copy()
 
 
 def build_calib_split_ats_frame(
@@ -868,10 +1008,16 @@ def fit_walkforward_confidence_calibrator(
     show_progress: bool = False,
     existing_calibrator: WalkForwardBetCalibrator | None = None,
 ) -> tuple[WalkForwardBetCalibrator, dict]:
-    """Phase 2a inline: tune + fit confidence calibrator on prior season only (leak-free)."""
-    from pipeline.calibration_metrics import compute_ece
+    """Phase 2a inline: tune + fit confidence calibrator on prior season only (leak-free).
+
+    When ``method`` / ``CONFIDENCE_CALIB_METHOD`` is ``auto``, pick the candidate
+    method with lowest prior-year ECE (tie-break: Brier), preferring
+    ``logistic_features`` when ECE is within 0.002 of the best.
+    """
+    from pipeline.calibration_metrics import compute_brier, compute_ece
     from pipeline.config import (
         CONFIDENCE_CALIB_METHOD,
+        CONFIDENCE_CALIB_METHOD_CANDIDATES,
         CONFIDENCE_CALIB_SCOPE,
         CONFIDENCE_WEIGHT_SHRINK,
         MAX_CONFIDENCE_SCORE,
@@ -892,86 +1038,146 @@ def fit_walkforward_confidence_calibrator(
     center = dict(DEFAULT_CONFIDENCE_WEIGHTS)
     if weight_center:
         center.update(weight_center)
-    calib_method = method or CONFIDENCE_CALIB_METHOD
+    requested = (method or CONFIDENCE_CALIB_METHOD or "isotonic").lower()
     scope = calib_scope or CONFIDENCE_CALIB_SCOPE
-    cal = existing_calibrator or WalkForwardBetCalibrator(
-        method=calib_method,
-        confidence_weights=center,
-    )
-    cal.method = calib_method
-    cal.confidence_weights = dict(center)
 
-    best_cal = cal
-    composite_weights = dict(center)
+    def _eval_method(m: str) -> tuple[float, float, WalkForwardBetCalibrator, dict]:
+        """Return (ece, brier, fitted_cal, composite_weights)."""
+        local_center = dict(center)
+        local_cal = WalkForwardBetCalibrator(method=m, confidence_weights=local_center)
+        composite = dict(local_center)
+        if TUNE_CONFIDENCE_WEIGHTS_IN_BACKTEST:
+            shrink = 1.0 if season_index <= 1 else CONFIDENCE_WEIGHT_SHRINK
+            ranges = weight_search_ranges(local_center, shrink=shrink)
+            composite, local_cal, _roi, _thr, _ece, _n = tune_confidence_weights(
+                train_df,
+                center=local_center,
+                ranges=ranges,
+                method=m,
+                objective="hybrid",
+                show_progress=False,
+                progress_desc=None,
+            )
+            if m in ("logistic_features", "logistic_isotonic"):
+                best_c, best_obj, best_local = local_cal.logistic_c, -1e9, local_cal
+                for c in (0.02, 0.05, 0.1, 0.25, 0.5, 1.0):
+                    trial = WalkForwardBetCalibrator(
+                        method=m, confidence_weights=composite, logistic_c=c,
+                    )
+                    trial.fit(train_df, method=m, scope=scope, confidence_weights=composite)
+                    scored = _scored_ats_bets(trial, train_df)
+                    if len(scored) < 35:
+                        continue
+                    y = np.asarray([s[0] for s in scored], dtype=float)
+                    cs = [s[1] for s in scored]
+                    p = np.asarray([s[2] for s in scored], dtype=float)
+                    ece = float(compute_ece(y, p))
+                    sp = _rank_spearman(y, cs)
+                    band_roi, _bmin, _bmax, band_n = _pick_confidence_band_gated_roi(
+                        scored, min_bets=35,
+                    )
+                    obj = sp + 0.5 * band_roi - ece
+                    if obj > best_obj:
+                        best_obj, best_c, best_local = obj, c, trial
+                local_cal = best_local
+                local_cal.logistic_c = best_c
+        else:
+            local_cal.fit(train_df, method=m, scope=scope, confidence_weights=local_center)
 
-    if TUNE_CONFIDENCE_WEIGHTS_IN_BACKTEST:
-        shrink = 1.0 if season_index <= 1 else CONFIDENCE_WEIGHT_SHRINK
-        ranges = weight_search_ranges(center, shrink=shrink)
-        composite_weights, best_cal, _roi, _thr, _ece, _n = tune_confidence_weights(
-            train_df,
-            center=center,
-            ranges=ranges,
-            method=calib_method,
-            objective="hybrid",
-            show_progress=show_progress,
-            progress_desc=f"2a · weights · {train_season_label or 'prior'}",
-        )
-        if calib_method in ("logistic_features", "logistic_isotonic"):
-            best_c, best_obj, best_cal = best_cal.logistic_c, -1e9, best_cal
-            for c in (0.02, 0.05, 0.1, 0.25, 0.5, 1.0):
-                trial = WalkForwardBetCalibrator(
-                    method=calib_method,
-                    confidence_weights=composite_weights,
-                    logistic_c=c,
-                )
-                trial.fit(
-                    train_df,
-                    method=calib_method,
-                    scope=scope,
-                    confidence_weights=composite_weights,
-                )
-                scored = _scored_ats_bets(trial, train_df)
-                if len(scored) < 35:
-                    continue
-                y = np.asarray([s[0] for s in scored], dtype=float)
-                cs = [s[1] for s in scored]
-                p = np.asarray([s[2] for s in scored], dtype=float)
-                ece = float(compute_ece(y, p))
-                sp = _rank_spearman(y, cs)
-                band_roi, _bmin, _bmax, band_n = _pick_confidence_band_gated_roi(
-                    scored, min_bets=35,
-                )
-                obj = sp + 0.5 * band_roi - ece
-                if obj > best_obj:
-                    best_obj, best_c, best_cal = obj, c, trial
-            best_cal.logistic_c = best_c
+        if not local_cal._fitted:
+            local_cal.fit(train_df, method=m, scope=scope, confidence_weights=composite)
+
+        # Negative edge coef → fall back to isotonic for this candidate.
+        use_m = m
+        if m in ("logistic_features", "logistic_isotonic"):
+            feat_w = logistic_feature_importance(local_cal)
+            if float(feat_w.get("abs_edge_norm", 0.0)) < 0:
+                use_m = "isotonic"
+                local_cal = WalkForwardBetCalibrator(method="isotonic", confidence_weights=composite)
+                local_cal.fit(train_df, method="isotonic", scope=scope, confidence_weights=composite)
+
+        scored = _scored_ats_bets(local_cal, train_df)
+        if len(scored) < 20:
+            return 1e9, 1e9, local_cal, composite
+        y = np.asarray([s[0] for s in scored], dtype=float)
+        p = np.asarray([s[2] for s in scored], dtype=float)
+        return float(compute_ece(y, p)), float(compute_brier(y, p)), local_cal, composite
+
+    method_scores: list[dict] = []
+    if requested == "auto":
+        candidates = list(CONFIDENCE_CALIB_METHOD_CANDIDATES) or ["logistic_features", "isotonic", "platt"]
+        best_key = None
+        best_cal = None
+        best_composite = dict(center)
+        best_method = "isotonic"
+        for m in candidates:
+            ece, brier, cal, composite = _eval_method(m)
+            method_scores.append({"method": m, "ece": ece, "brier": brier})
+            # Prefer logistic_features when within 0.002 ECE of the best.
+            key = (ece, 0 if m == "logistic_features" else 1, brier)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_cal = cal
+                best_composite = composite
+                best_method = cal._calib_method_ats if hasattr(cal, "_calib_method_ats") else m
+        calib_method = best_method
+        best_cal = best_cal or WalkForwardBetCalibrator(method="isotonic", confidence_weights=center)
+        composite_weights = best_composite
     else:
-        best_cal.fit(train_df, method=calib_method, scope=scope, confidence_weights=center)
+        calib_method = requested
+        ece, brier, best_cal, composite_weights = _eval_method(calib_method)
+        method_scores.append({"method": calib_method, "ece": ece, "brier": brier})
 
     if not best_cal._fitted:
         best_cal.fit(train_df, method=calib_method, scope=scope, confidence_weights=composite_weights)
 
     feat_w = logistic_feature_importance(best_cal)
-    if calib_method in ("logistic_features", "logistic_isotonic"):
-        edge_coef = float(feat_w.get("abs_edge_norm", 0.0))
-        if edge_coef < 0:
-            calib_method = "isotonic"
-            best_cal = WalkForwardBetCalibrator(
-                method="isotonic",
-                confidence_weights=composite_weights,
-            )
-            best_cal.fit(
-                train_df,
-                method="isotonic",
-                scope=scope,
-                confidence_weights=composite_weights,
-            )
-            feat_w = {}
+    calib_method = getattr(best_cal, "_calib_method_ats", calib_method) or calib_method
 
     scored = _scored_ats_bets(best_cal, train_df)
     y_all = np.asarray([s[0] for s in scored], dtype=float) if scored else np.array([])
     p_all = np.asarray([s[2] for s in scored], dtype=float) if scored else np.array([])
     cs_all = [s[1] for s in scored]
+
+    from pipeline.config import COVER_CALIB_REQUIRE_ECE_IMPROVEMENT, COVER_CALIB_REQUIRE_LOGLOSS_IMPROVEMENT
+    from pipeline.calibration_metrics import compute_log_loss
+
+    raw_ece = np.nan
+    raw_ll = np.nan
+    ece_gate_pass = True
+    if COVER_CALIB_REQUIRE_ECE_IMPROVEMENT and len(y_all) >= 20:
+        # Raw cover probs from the training frame (pre-calibrator).
+        raw_p = []
+        for _, row in train_df.iterrows():
+            rp = row.get(
+                "SPREAD_COVER_PROB_RAW",
+                row.get("COVER_PROB_RAW", row.get("SPREAD_COVER_PROB", np.nan)),
+            )
+            if rp is None or (isinstance(rp, float) and not np.isfinite(rp)):
+                continue
+            raw_p.append(float(rp))
+        if len(raw_p) == len(y_all):
+            raw_ece = float(compute_ece(y_all, np.asarray(raw_p, dtype=float)))
+            cal_ece = float(compute_ece(y_all, p_all)) if len(p_all) else np.nan
+            if np.isfinite(raw_ece) and np.isfinite(cal_ece) and cal_ece > raw_ece + 1e-9:
+                ece_gate_pass = False
+                best_cal._fitted = False
+                print(
+                    f"  ⏭ Cover calib ECE gate: cal={cal_ece:.4f} > raw={raw_ece:.4f} — using raw"
+                )
+            if (
+                COVER_CALIB_REQUIRE_LOGLOSS_IMPROVEMENT
+                and best_cal._fitted
+                and len(p_all)
+            ):
+                raw_ll = float(compute_log_loss(y_all, np.asarray(raw_p, dtype=float)))
+                cal_ll = float(compute_log_loss(y_all, p_all))
+                if np.isfinite(raw_ll) and np.isfinite(cal_ll) and cal_ll > raw_ll + 1e-9:
+                    ece_gate_pass = False
+                    best_cal._fitted = False
+                    print(
+                        f"  ⏭ Cover calib log-loss gate: cal={cal_ll:.4f} > raw={raw_ll:.4f} — using raw"
+                    )
 
     conf_thr, conf_max = walkforward_confidence_gate(
         train_df,
@@ -991,9 +1197,13 @@ def fit_walkforward_confidence_calibrator(
         "train_season": train_season_label,
         "test_season": test_season_label,
         "calib_method": calib_method,
+        "calib_method_requested": requested,
+        "method_scores": method_scores,
         "logistic_c": float(best_cal.logistic_c),
         "train_roi": float(train_roi) if np.isfinite(train_roi) else np.nan,
         "train_ece": train_ece,
+        "raw_cover_ece": float(raw_ece) if np.isfinite(raw_ece) else np.nan,
+        "ece_gate_pass": bool(ece_gate_pass),
         "train_spearman": train_sp,
         "train_min_confidence": float(conf_thr),
         "train_max_confidence": float(conf_max) if conf_max is not None else None,
@@ -1025,9 +1235,12 @@ def save_phase2a_walkforward_state(
 
     path = confidence_weights_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    chosen_method = CONFIDENCE_CALIB_METHOD
+    if season_rows and season_rows[-1].get("calib_method"):
+        chosen_method = season_rows[-1]["calib_method"]
     payload: dict = {
         "inline_phase2a": True,
-        "calib_method": CONFIDENCE_CALIB_METHOD,
+        "calib_method": chosen_method,
         "unified_weight_tuning": season_rows,
     }
     if season_rows:
@@ -1039,6 +1252,7 @@ def save_phase2a_walkforward_state(
         payload["suggested_logistic_c"] = latest.get("logistic_c")
         payload["feature_weights_latest"] = latest.get("feature_weights", {})
         payload["weights_changed_latest"] = bool(latest.get("weights_changed", False))
+        payload["method_scores_latest"] = latest.get("method_scores", [])
     if latest_center:
         payload["weight_center_latest"] = {k: float(v) for k, v in latest_center.items()}
     path.write_text(json.dumps(payload, indent=2, default=str))
@@ -1104,13 +1318,14 @@ def tune_confidence_weights(
                 best_ece = ece
                 best_thr = int(_bmin) if band_n >= min_bets else thr
                 best_n = band_n if band_n >= min_bets else n_bets
-                best_weights = dict(weights)
+                best_weights = clamp_confidence_weights(weights)
                 best_cal = cal
         elif roi > best_roi + 1e-9 or (abs(roi - best_roi) <= 1e-9 and ece < best_ece):
             best_roi, best_ece, best_thr, best_n = roi, ece, thr, n_bets
-            best_weights = dict(weights)
+            best_weights = clamp_confidence_weights(weights)
             best_cal = cal
 
+    best_weights = clamp_confidence_weights(best_weights)
     best_cal = WalkForwardBetCalibrator(method=calib_method, confidence_weights=best_weights)
     best_cal.fit(train_df, method=calib_method, scope="all_prior", confidence_weights=best_weights)
     return best_weights, best_cal, best_roi, best_thr, best_ece, best_n

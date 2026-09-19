@@ -11,7 +11,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from pipeline.market import elo_meta_agreement
-from pipeline.market_targets import closing_spread_series
+
 
 DERIVED_COLS = [
     "model_edge", "abs_model_edge", "rating_uncertainty_sum",
@@ -25,6 +25,15 @@ EXTRA_FEATURE_DEFAULTS = {
     "elo_meta_agreement_feat": 1.0,
     "spread_quantile_width_feat": 24.0,
 }
+
+
+def _finite_or(value, default):
+    """Return float(value) when finite; otherwise float(default)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return f if np.isfinite(f) else float(default)
 
 
 class ATSClassifier:
@@ -41,12 +50,18 @@ class ATSClassifier:
         self.fitted = False
 
     @staticmethod
-    def _close_spread(row) -> float:
-        for k in ("closing_spread", "CLOSING_SPREAD", "market_spread", "MARKET_SPREAD"):
+    def _decision_spread(row) -> float:
+        """T-60 decision/market line for features — never closing (CLV-only)."""
+        for k in ("decision_spread", "DECISION_SPREAD", "market_spread", "MARKET_SPREAD"):
             v = row.get(k) if hasattr(row, "get") else None
             if v is not None and pd.notna(v):
                 return float(v)
         return np.nan
+
+    @staticmethod
+    def _close_spread(row) -> float:
+        """Backward-compatible alias; does NOT fall back to closing_spread."""
+        return ATSClassifier._decision_spread(row)
 
     @staticmethod
     def _pred_spread(row) -> float:
@@ -59,19 +74,29 @@ class ATSClassifier:
     def _enrich_row(self, row: dict) -> dict:
         r = dict(row)
         pred = self._pred_spread(r)
-        close = self._close_spread(r)
-        mkt = r.get("market_spread", r.get("MARKET_SPREAD", close))
-        edge = pred + float(mkt) if pd.notna(mkt) else pred + close
-        r["model_edge"] = edge
-        r["abs_model_edge"] = abs(edge)
-        h_unc = float(r.get("h_rating_uncertainty", r.get("H_RATING_UNCERTAINTY", 350)) or 350)
-        a_unc = float(r.get("a_rating_uncertainty", r.get("A_RATING_UNCERTAINTY", 350)) or 350)
-        r["rating_uncertainty_sum"] = h_unc + a_unc
-        r["elo_meta_agreement_feat"] = float(
-            r.get("elo_meta_agreement", r.get("ELO_META_AGREEMENT", 1.0)) or 1.0
+        decision = self._decision_spread(r)
+        if pd.isna(decision):
+            r["decision_missing"] = 1
+            # Match training-time fillna(0) — never leave NaN in the feature row.
+            r["model_edge"] = EXTRA_FEATURE_DEFAULTS["model_edge"]
+            r["abs_model_edge"] = EXTRA_FEATURE_DEFAULTS["abs_model_edge"]
+        else:
+            r["decision_missing"] = 0
+            edge = pred + float(decision)
+            r["model_edge"] = edge
+            r["abs_model_edge"] = abs(edge)
+        h_unc = _finite_or(
+            r.get("h_rating_uncertainty", r.get("H_RATING_UNCERTAINTY")), 350
         )
-        r["spread_quantile_width_feat"] = float(
-            r.get("spread_quantile_width", r.get("SPREAD_QUANTILE_WIDTH", 24)) or 24
+        a_unc = _finite_or(
+            r.get("a_rating_uncertainty", r.get("A_RATING_UNCERTAINTY")), 350
+        )
+        r["rating_uncertainty_sum"] = h_unc + a_unc
+        r["elo_meta_agreement_feat"] = _finite_or(
+            r.get("elo_meta_agreement", r.get("ELO_META_AGREEMENT")), 1.0
+        )
+        r["spread_quantile_width_feat"] = _finite_or(
+            r.get("spread_quantile_width", r.get("SPREAD_QUANTILE_WIDTH")), 24.0
         )
         return r
 
@@ -94,18 +119,24 @@ class ATSClassifier:
 
     @staticmethod
     def labels_from_df(df: pd.DataFrame) -> np.ndarray:
-        close = closing_spread_series(df)
-        if close is None:
-            close = pd.to_numeric(df.get("market_spread", df.get("MARKET_SPREAD")), errors="coerce")
+        """Canonical home-cover labels vs T-60 decision line (pushes → NaN).
+
+        ``home_cover = actual_margin + decision_home_spread > 0``.
+        Direction flip to the selected bet side happens once at predict time.
+        """
+        from pipeline.market_targets import decision_spread_series
+
+        decision = decision_spread_series(df)
+        if decision is None:
+            decision = pd.to_numeric(
+                df.get("decision_spread", df.get("market_spread", df.get("MARKET_SPREAD"))),
+                errors="coerce",
+            )
         margin = df["actual_margin"] if "actual_margin" in df.columns else df["ACTUAL_MARGIN"]
-        cover = margin + close
-        pred = df.get("pred_margin", df.get("PRED_SPREAD", 0))
-        edge = pred + close
-        direction = np.where(edge >= 0, "Home", "Away")
-        y = np.where(cover > 0, 1, 0)
-        y = np.where(direction == "Away", 1 - y, y)
+        cover = margin + decision
+        # Canonical home-cover label; Away conversion is predict-time only.
+        y = np.where(cover > 0, 1, 0).astype(float)
         push = cover == 0
-        y = y.astype(float)
         y[push] = np.nan
         return y
 
@@ -147,25 +178,37 @@ class ATSClassifier:
         self.fitted = True
         return self
 
-    def predict_cover_prob(self, feat_dict: dict, direction: str, market_spread: float) -> float:
+    def predict_home_cover_prob(self, feat_dict: dict, market_spread: float) -> float:
+        """Canonical P(home covers vs decision/T-60 line). Never side-flipped."""
         if not self.fitted:
             return 0.524
-        row = self._enrich_row(dict(feat_dict))
+        row = dict(feat_dict)
         row["market_spread"] = market_spread
-        X = np.array([[row.get(c, EXTRA_FEATURE_DEFAULTS.get(c, 0)) for c in self._fit_cols]], dtype=float)
+        row["decision_spread"] = market_spread
+        row = self._enrich_row(row)
+        X = np.array(
+            [[
+                _finite_or(row.get(c), EXTRA_FEATURE_DEFAULTS.get(c, 0.0))
+                for c in self._fit_cols
+            ]],
+            dtype=float,
+        )
         Xs = self.scaler.transform(X)
-        raw = float(self.model.predict_proba(Xs)[0, 1])
-        if direction == "Away":
-            raw = 1.0 - raw
+        p_home = float(self.model.predict_proba(Xs)[0, 1])
         if self.iso is not None:
             try:
-                prob = float(self.iso.predict([raw if direction == "Home" else 1 - raw])[0])
+                p_home = float(self.iso.predict([p_home])[0])
             except Exception:
-                prob = float(self.iso.predict(np.array([raw]))[0])
-            if direction == "Away":
-                prob = 1.0 - prob if self.calibrator_name != "beta" else 1.0 - prob
-            return float(np.clip(prob if direction == "Home" else 1.0 - (1.0 - prob), 0.01, 0.99))
-        return float(np.clip(raw if direction == "Home" else 1.0 - raw, 0.01, 0.99))
+                pass
+        return float(np.clip(p_home, 0.01, 0.99))
+
+    def predict_cover_prob(self, feat_dict: dict, direction: str, market_spread: float) -> float:
+        """Backward-compatible wrapper.
+
+        Returns P(home covers). Callers that need the chosen-side probability
+        must convert once via ``ats_ev.cover_prob_for_side``.
+        """
+        return self.predict_home_cover_prob(feat_dict, market_spread)
 
     def save(self, path: str | Path):
         path = Path(path)

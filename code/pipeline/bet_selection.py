@@ -5,19 +5,9 @@ import numpy as np
 import pandas as pd
 
 from pipeline.config import (
-    BET_SELECTION_MODE,
-    CONFIDENCE_EDGE_SCALED,
-    EDGE_AVOID_BAND,
-    EDGE_AVOID_BAND_MIN_ELO_AGREE,
     EDGE_STAKE_TIERS,
-    MAX_QUANTILE_WIDTH,
     MIN_CONFIDENCE_SCORE,
-    MIN_DISAGREEMENT_TRUST,
     MIN_EDGE_BUCKET,
-    SKIP_PHANTOM_INJURY,
-    SKIP_TIGHT_SPREAD,
-    TIGHT_SPREAD_MAX,
-    USE_TIER_STAKE_GATES,
 )
 
 
@@ -135,29 +125,55 @@ def edge_scaled_min_confidence(abs_edge: float, base: float | None = None) -> fl
         return floor
     ae = float(abs(abs_edge)) if abs_edge is not None and np.isfinite(abs_edge) else 0.0
     if ae < 5.0:
-        return floor + 4.0
-    if ae < 8.0:
         return floor + 2.0
+    if ae < 8.0:
+        return floor + 1.0
     return floor
+
+
+def normalize_edge_avoid_bands(band) -> list[tuple[float, float]]:
+    """Accept None, a single (lo, hi), or a list of (lo, hi) bands."""
+    if band is None:
+        return []
+    if isinstance(band, (list, tuple)) and len(band) >= 2:
+        first = band[0]
+        if isinstance(first, (list, tuple)):
+            out = []
+            for item in band:
+                if item is None or len(item) < 2:
+                    continue
+                out.append((float(item[0]), float(item[1])))
+            return out
+        return [(float(band[0]), float(band[1]))]
+    return []
 
 
 def passes_edge_avoid_band(
     abs_edge: float,
     elo_meta_agreement: float | None = None,
 ) -> bool:
-    """False when |edge| is in the configured dead-zone band without Elo agreement."""
+    """False when |edge| is in a configured dead-zone band without Elo agreement."""
     import pipeline.config as cfg
-    band = cfg.EDGE_AVOID_BAND
-    if band is None:
+    bands = normalize_edge_avoid_bands(cfg.EDGE_AVOID_BAND)
+    if not bands:
         return True
     if abs_edge is None or not np.isfinite(abs_edge):
         return True
-    lo, hi = band
     ae = float(abs(abs_edge))
-    if not (float(lo) <= ae < float(hi)):
+    in_dead = any(float(lo) <= ae < float(hi) for lo, hi in bands)
+    if not in_dead:
         return True
     agree = float(elo_meta_agreement if elo_meta_agreement is not None else 1.0)
     return agree >= float(cfg.EDGE_AVOID_BAND_MIN_ELO_AGREE)
+
+
+def actionable_min_edge(mode: str | None = None) -> float:
+    """Primary |edge| floor: bucket min in edge modes, else CONFIDENCE_MIN_EDGE."""
+    import pipeline.config as cfg
+    mode = mode or cfg.BET_SELECTION_MODE
+    if uses_edge_gates(mode):
+        return float(max(float(cfg.MIN_EDGE_BUCKET), float(cfg.CONFIDENCE_MIN_EDGE)))
+    return float(cfg.CONFIDENCE_MIN_EDGE)
 
 
 def passes_confidence_actionable_gates(
@@ -174,21 +190,24 @@ def passes_confidence_actionable_gates(
     elo_meta_agreement: float | None = None,
     min_edge: float | None = None,
 ) -> bool:
-    """Shared actionable spread gate for simulate + live predict."""
+    """Shared actionable spread gate for simulate + live predict.
+
+    Edge-bucket modes: primary |edge| + avoid/width/trust; confidence is secondary.
+    """
     import pipeline.config as cfg
     if lean in ("Pass", None, "", "nan"):
         return False
-    min_edge_val = float(cfg.CONFIDENCE_MIN_EDGE if min_edge is None else min_edge)
+    min_edge_val = float(actionable_min_edge() if min_edge is None else min_edge)
     if abs(float(edge_pts or 0.0)) < min_edge_val:
         return False
     if not passes_quantile_width(conf_width):
         return False
-    if float(disagreement_trust or 1.0) < float(MIN_DISAGREEMENT_TRUST):
+    if float(disagreement_trust or 1.0) < float(cfg.MIN_DISAGREEMENT_TRUST):
         return False
-    if SKIP_PHANTOM_INJURY and phantom_injury_flag:
+    if cfg.SKIP_PHANTOM_INJURY and phantom_injury_flag:
         return False
-    if SKIP_TIGHT_SPREAD and market_spread is not None and np.isfinite(market_spread):
-        if abs(float(market_spread)) <= float(TIGHT_SPREAD_MAX):
+    if cfg.SKIP_TIGHT_SPREAD and market_spread is not None and np.isfinite(market_spread):
+        if abs(float(market_spread)) <= float(cfg.TIGHT_SPREAD_MAX):
             return False
     if not passes_edge_avoid_band(abs(edge_pts), elo_meta_agreement=elo_meta_agreement):
         return False
@@ -207,8 +226,9 @@ def apply_bet_selection_gates(
     conf_width: float,
     *,
     mode: str | None = None,
+    elo_meta_agreement: float | None = None,
 ) -> str:
-    """Return direction or Pass after edge-bucket / quantile filters (skipped in confidence_only)."""
+    """Return direction or Pass after edge-bucket / quantile / avoid filters."""
     import pipeline.config as cfg
     if direction == "Pass":
         return direction
@@ -220,7 +240,17 @@ def apply_bet_selection_gates(
             return "Pass"
         if not passes_quantile_width(conf_width, max_width=cfg.MAX_QUANTILE_WIDTH):
             return "Pass"
+        if not passes_edge_avoid_band(abs(edge_pts), elo_meta_agreement=elo_meta_agreement):
+            return "Pass"
     return direction
+
+
+def confidence_tier_stake_mult(confidence_tier: int) -> float:
+    """Demote toxic confidence tiers (tier 2 ≈ −47% ROI in latest walk-forward)."""
+    import pipeline.config as cfg
+    if int(confidence_tier) == 2:
+        return float(getattr(cfg, "CONFIDENCE_TIER_2_STAKE_MULT", 0.0))
+    return 1.0
 
 
 def use_tier_stake_gates() -> bool:

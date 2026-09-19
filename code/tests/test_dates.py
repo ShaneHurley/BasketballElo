@@ -11,6 +11,7 @@ from pipeline.dates import (
     coerce_game_date,
     date_from_game_id,
     is_valid_timestamp,
+    prepare_chronological_stints,
     resolve_game_date,
     to_py_date,
 )
@@ -90,3 +91,52 @@ def test_to_py_date_never_nat():
 
     resolved = to_py_date("2025-10-21")
     assert resolved == datetime.date(2025, 10, 21)
+
+
+def test_prepare_chronological_stints_mixed_iso_us_strings():
+    """2025-26 combined-stats: ISO + M/D/YYYY in the same object column must
+    sort into real chronological order (not lexicographic string order)."""
+    df = pd.DataFrame({
+        "GAME_ID": ["22500508", "22500001", "22500368", "22500002"],
+        "game_date": ["1/5/2026", "2025-10-21", "12/17/2025", "2025-10-22"],
+        "stint_id": [0, 0, 0, 0],
+    })
+    out = prepare_chronological_stints(df, context="test")
+    dates = out.drop_duplicates("GAME_ID")["game_date"].tolist()
+    assert dates == sorted(dates)
+    assert dates[0] == pd.Timestamp("2025-10-21")
+    assert dates[-1] == pd.Timestamp("2026-01-05")
+
+
+def test_prepare_chronological_stints_mixed_timestamp_and_str():
+    """Object column mixing Timestamp + str used to sort Timestamps first
+    then strings — breaking is_monotonic_increasing after drop_duplicates."""
+    df = pd.DataFrame({
+        "GAME_ID": ["a", "b", "c"],
+        "game_date": [pd.Timestamp("2025-11-02"), "2025-11-01", pd.Timestamp("2025-11-03")],
+        "stint_id": [0, 0, 0],
+    })
+    # Precondition: naive sort+assert would fail (the Colab 2026 crash mode).
+    naive = df.sort_values(["game_date", "GAME_ID", "stint_id"])
+    assert not naive.drop_duplicates("GAME_ID")["game_date"].is_monotonic_increasing
+
+    out = prepare_chronological_stints(df, context="test")
+    assert out.drop_duplicates("GAME_ID")["game_date"].is_monotonic_increasing
+    assert out.iloc[0]["GAME_ID"] == "b"
+
+
+def test_prepare_chronological_stints_plain_to_datetime_nat_recovered_or_dropped():
+    """Without format='mixed', US dates become NaT; helper must not leave
+    them in a non-monotonic per-game series."""
+    raw = pd.Series(["2025-10-21", "12/17/2025", "2025-10-22"])
+    broken = pd.to_datetime(raw, errors="coerce")  # may NaT the US row
+    df = pd.DataFrame({
+        "GAME_ID": ["g0", "g1", "g2"],
+        "game_date": broken,
+        "stint_id": [0, 0, 0],
+    })
+    # Re-attach original strings so mixed parse can recover.
+    df["game_date"] = raw
+    out = prepare_chronological_stints(df, context="test")
+    assert out["game_date"].notna().all()
+    assert out.drop_duplicates("GAME_ID")["game_date"].is_monotonic_increasing

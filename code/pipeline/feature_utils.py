@@ -64,9 +64,11 @@ def rest_bucket_flags(rest_days: int) -> dict:
 def engine_implied_margins(elo_tracker, hier_engine,
                            ho_off, ho_def, ao_off, ao_def,
                            home_starters, away_starters, exp_poss):
-    cfg = getattr(elo_tracker, "cfg", {}) or {}
-    scaling = cfg.get("ELO_SCALING_FACTOR", 1000) or 1000
-    hb = cfg.get("HOME_PPP_BOOST", 0.024)
+    # Use elo_cfg (not bare cfg): Colab inlining historically rewrote cfg.* and
+    # must keep reading the tracker's tuned dict, not notebook globals.
+    elo_cfg = getattr(elo_tracker, "cfg", {}) or {}
+    scaling = elo_cfg.get("ELO_SCALING_FACTOR", 1000) or 1000
+    hb = elo_cfg.get("HOME_PPP_BOOST", 0.024)
     lx = getattr(elo_tracker, "league_xppp", 1.10)
     exp_ppp_h = lx + hb + (ho_off - ao_def) / scaling
     exp_ppp_a = lx - hb + (ao_off - ho_def) / scaling

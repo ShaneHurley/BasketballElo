@@ -13,7 +13,7 @@ from pipeline.config import (
     CONFIDENCE_SELECTION_MODE,
 )
 from pipeline.market import spread_kelly_fraction, american_to_decimal
-from pipeline.bet_selection import use_tier_stake_gates, uses_edge_gates
+from pipeline.bet_selection import confidence_tier_stake_mult, use_tier_stake_gates, uses_edge_gates
 
 PROFILES = {
     "conservative": {
@@ -91,6 +91,7 @@ def compute_stake(
 
     stake = kelly * kelly_frac * interval_penalty * unc_penalty
     stake *= float(edge_stake_mult) * float(volatility_mult)
+    stake *= confidence_tier_stake_mult(int(confidence_tier or 1))
     if CONFIDENCE_STAKE_MODE and confidence_score is not None:
         stake *= float(np.clip(confidence_score / 100.0, 0.35, 1.0))
     return float(max(0.0, min(stake, cfg["max_daily_exposure"])))

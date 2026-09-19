@@ -50,29 +50,31 @@ def test_phantom_injury_flag():
 def test_meta_model_close_residual_fit():
     n = 80
     rng = np.random.default_rng(0)
-    close = rng.normal(-4, 2, n)
+    decision = rng.normal(-4, 2, n)
     margin = rng.normal(0, 8, n)
     rows = {c: np.zeros(n) for c in SAFE_FEATURE_COLS}
     rows["elo_margin"] = margin + rng.normal(0, 2, n)
     rows["elo_net"] = rows["elo_margin"] / 10.0
     rows["exp_poss"] = np.full(n, 100.0)
-    rows["closing_spread"] = close
-    rows["market_spread"] = close
+    rows["decision_spread"] = decision
+    rows["closing_spread"] = decision
+    rows["market_spread"] = decision
     df = pd.DataFrame(rows)
     model = MetaScoreModel(
         ridge_alpha=5.0,
         use_quantile_heads=True,
-        train_target="close_residual",
-        cb_params={"iterations": 50, "depth": 2, "verbose": 0},
+        train_target="decision_residual",
+        cb_params={"iterations": 50, "depth": 2, "verbose": 0, "allow_writing_files": False},
     )
     y_h = (margin + 220) / 2.0
     y_a = (220 - margin) / 2.0
     model.fit(df, y_h, y_a)
     assert model.fitted
-    assert model._active_train_mode == "close_residual"
+    assert model._active_train_mode == "decision_residual"
     assert "q10" in model.quantile_models or model.quantile_models == {}
     pred = model.predict({**{c: float(df[c].iloc[0]) for c in SAFE_FEATURE_COLS},
-                          "closing_spread": close[0], "market_spread": close[0]})
+                          "decision_spread": decision[0], "market_spread": decision[0],
+                          "closing_spread": decision[0]})
     assert "pred_margin" in pred
     assert np.isfinite(pred["pred_margin"])
 
