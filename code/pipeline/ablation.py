@@ -39,6 +39,9 @@ from pipeline.model import (
     STRUCTURED_SCORE_COLS,
     PACE_UNCERTAINTY_COLS,
     LINE_DERIVED_FEATURE_COLS,
+    HAPM_COLS,
+    RAPM_COLS,
+    EPVA_COLS,
 )
 from pipeline.shot_hierarchy import HIER_SHOT_MIX_COLS, HIER_SHOT_MAKE_COLS
 from pipeline.promotion_gates import (
@@ -333,6 +336,66 @@ def default_configs() -> dict:
             "LINEUP_COMPOSITE_EVIDENCE_POOLING": False,
         }},
         "hapm_priors": {"backtest_kwargs": {"use_hapm_priors": True}},
+        "rapm_priors": {"backtest_kwargs": {"use_rapm_priors": True}},
+        # Ablation 8.4 — RAPM vs HAPM/chemistry multicollinearity
+        "rapm_only": {
+            "feature_cols": _without(
+                SAFE_FEATURE_COLS,
+                HAPM_COLS + EPVA_COLS + [
+                    "h_chem_duo_net", "a_chem_duo_net",
+                    "h_chem_trio_net", "a_chem_trio_net",
+                    "h_chem_net", "a_chem_net", "chem_diff",
+                    "h_onoff_net", "a_onoff_net", "chem_uncertainty",
+                ],
+            ),
+            "backtest_kwargs": {"use_rapm_priors": True, "use_epva_features": False},
+        },
+        "hapm_chem": {
+            "feature_cols": _without(SAFE_FEATURE_COLS, RAPM_COLS + EPVA_COLS),
+            "backtest_kwargs": {
+                "use_hapm_priors": True,
+                "use_rapm_priors": False,
+                "use_epva_features": False,
+            },
+        },
+        "all": {
+            "feature_cols": _without(SAFE_FEATURE_COLS, EPVA_COLS),
+            "backtest_kwargs": {
+                "use_rapm_priors": True,
+                "use_hapm_priors": True,
+                "use_epva_features": False,
+            },
+        },
+        # Micro-tune of rapm_only: depth−1, L2×1.25, colsample×0.90
+        "rapm_only_retuned": {
+            "feature_cols": _without(
+                SAFE_FEATURE_COLS,
+                HAPM_COLS + EPVA_COLS + [
+                    "h_chem_duo_net", "a_chem_duo_net",
+                    "h_chem_trio_net", "a_chem_trio_net",
+                    "h_chem_net", "a_chem_net", "chem_diff",
+                    "h_onoff_net", "a_onoff_net", "chem_uncertainty",
+                ],
+            ),
+            "backtest_kwargs": {"use_rapm_priors": True, "use_epva_features": False},
+            "model_kwargs": {
+                "cb_params_scale": {
+                    "depth_delta": -1,
+                    "l2_leaf_reg_scale": 1.25,
+                    "colsample_scale": 0.90,
+                },
+            },
+        },
+        # Calib-hold-MAE: RAPM + VA, EPVA gated off (hold MAE ≤ rapm_v7; chase ECE).
+        "calib_hold_mae": {
+            "feature_cols": _without(SAFE_FEATURE_COLS, EPVA_COLS),
+            "backtest_kwargs": {
+                "use_rapm_priors": True,
+                "use_hapm_priors": True,
+                "use_epva_features": False,
+                "use_venn_abers_filter": True,
+            },
+        },
         # Specialized market pipeline v2
         "gaussian_ou_gates": {"config_overrides": {
             "OU_USE_GAUSSIAN_PROB": True,
@@ -808,6 +871,7 @@ def run_ablation(stints_df, odds_dict=None, configs: dict = None,
                 rolling_window_size=rolling_window_size,
                 model_kwargs=model_kwargs,
                 feature_cols=feature_cols,
+                tuning_cache_tag=str(name),
                 **backtest_kwargs,
             )
         finally:
@@ -890,4 +954,118 @@ def run_direct_score_locked_ablation(
             print("\nDirect-score promotion gates:")
             print(pd.DataFrame(gate_rows).to_string(index=False))
     return summary_df, detail, {"folds": folds, "gates": gate_rows}
+
+
+def rapm_hapm_ablation_configs() -> dict:
+    """Subset of default_configs for RAPM vs HAPM/chem multicollinearity study."""
+    full = default_configs()
+    keys = ("rapm_only", "hapm_chem", "all", "rapm_only_retuned")
+    return {k: full[k] for k in keys if k in full}
+
+
+CHEM_FEATURE_COLS = [
+    "h_chem_duo_net", "a_chem_duo_net",
+    "h_chem_trio_net", "a_chem_trio_net",
+    "h_chem_net", "a_chem_net", "chem_diff",
+    "h_onoff_net", "a_onoff_net", "chem_uncertainty",
+]
+
+
+def hapm_chem_prune_cols() -> list:
+    """Columns removed from SAFE when should_prune_hapm_chem says prune."""
+    return list(HAPM_COLS) + list(CHEM_FEATURE_COLS)
+
+
+def should_prune_hapm_chem(
+    summary_df: pd.DataFrame,
+    *,
+    mae_tol: float = 0.05,
+    std_tol: float = 0.02,
+) -> dict:
+    """Prune HAPM/chem from SAFE only if retuned rapm_only matches ``all`` fold-std.
+
+    Uses per-season (non-ALL) rows for cross-fold MAE std. Never keep redundant
+    features solely because ``all`` shrinks variance without a retune check.
+    """
+    if summary_df is None or summary_df.empty:
+        return {"prune": False, "reason": "empty summary"}
+    seasons = summary_df[summary_df["season"] != "ALL"].copy()
+    if seasons.empty:
+        seasons = summary_df.copy()
+
+    def _stats(cfg: str) -> tuple[float, float]:
+        g = seasons[seasons["config"] == cfg]
+        if g.empty:
+            return float("nan"), float("nan")
+        mae = pd.to_numeric(g["spread_mae"], errors="coerce")
+        return float(mae.mean()), float(mae.std(ddof=0)) if len(mae) > 1 else 0.0
+
+    ro_m, ro_s = _stats("rapm_only")
+    all_m, all_s = _stats("all")
+    rt_m, rt_s = _stats("rapm_only_retuned")
+    out = {
+        "rapm_only_mae_mean": ro_m,
+        "rapm_only_mae_std": ro_s,
+        "all_mae_mean": all_m,
+        "all_mae_std": all_s,
+        "rapm_only_retuned_mae_mean": rt_m,
+        "rapm_only_retuned_mae_std": rt_s,
+        "prune": False,
+        "reason": "",
+    }
+    if not all(np.isfinite(x) for x in (ro_m, all_m, rt_m, ro_s, all_s, rt_s)):
+        out["reason"] = "missing arm metrics"
+        return out
+    # If all clearly beats mean MAE, keep HAPM/chem.
+    if all_m < ro_m - mae_tol and all_m < rt_m - mae_tol:
+        out["reason"] = "all improves mean MAE — keep HAPM/chem"
+        return out
+    # Retuned rapm_only must match all fold-std (within tol) at equal/better mean.
+    if rt_m <= all_m + mae_tol and rt_s <= all_s + std_tol:
+        out["prune"] = True
+        out["reason"] = (
+            "rapm_only_retuned matches all fold-std at equal/better mean MAE — prune HAPM/chem"
+        )
+        return out
+    out["reason"] = (
+        "retuned rapm_only still loses on mean or fold-std vs all — keep HAPM/chem"
+    )
+    return out
+
+
+def run_rapm_hapm_ablation(
+    stints_df,
+    odds_dict=None,
+    *,
+    rolling_window_size: int = 4,
+    n_tuning_trials_elo: int = 8,
+    n_tuning_trials_hier: int = 8,
+    n_tuning_trials_meta: int = 12,
+) -> tuple:
+    """Ablation 8.4: four arms + should_prune_hapm_chem decision.
+
+    Elo/Hier caches are shared across arms; Meta/total/win caches are tagged
+    per config so feature-subset retunes stay isolated.
+    """
+    configs = rapm_hapm_ablation_configs()
+    # Ensure EPVA stays gated off for this multicollinearity study (MAE baseline).
+    for spec in configs.values():
+        bk = dict(spec.get("backtest_kwargs") or {})
+        bk.setdefault("use_epva_features", False)
+        # rapm_only / retuned already set use_rapm; all sets both; hapm_chem sets hapm.
+        spec["backtest_kwargs"] = bk
+    summary_df, detail = run_ablation(
+        stints_df,
+        odds_dict=odds_dict,
+        configs=configs,
+        rolling_window_size=rolling_window_size,
+        n_tuning_trials_elo=n_tuning_trials_elo,
+        n_tuning_trials_hier=n_tuning_trials_hier,
+        n_tuning_trials_meta=n_tuning_trials_meta,
+    )
+    prune = should_prune_hapm_chem(summary_df)
+    print(f"\n{'='*70}\nHAPM/CHEM PRUNE DECISION\n{'='*70}")
+    for k, v in prune.items():
+        print(f"  {k}: {v}")
+    return summary_df, detail, prune
 
