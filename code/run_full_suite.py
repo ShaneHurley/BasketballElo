@@ -156,6 +156,29 @@ def _print_scoreboard(results: pd.DataFrame) -> dict:
                 f"RES={murphy['resolution']:.4f} UNC={murphy['uncertainty']:.4f} "
                 f"(Brier={murphy['brier']:.4f}, n={murphy['n']})"
             )
+            print(
+                f"  Reliability (primary KPI): {murphy['reliability']:.4f}  "
+                f"| aggregate Brier: {murphy['brier']:.4f}"
+            )
+            try:
+                from pipeline.forecast_eval import (
+                    compute_spiegelhalter_z,
+                    compute_decile_z,
+                )
+                sz = compute_spiegelhalter_z(y[mask].values, p[mask].values)
+                dz = compute_decile_z(y[mask].values, p[mask].values)
+                print(
+                    f"  Spiegelhalter Z (global): z={sz.get('z', float('nan')):.3f} "
+                    f"p={sz.get('p_value', float('nan')):.4f} n={sz.get('n', 0)}"
+                )
+                print(
+                    f"  Decile Z (equal-mass): max|Z_k|={dz.get('max_abs_z', float('nan')):.3f} "
+                    f"n_bins={dz.get('n_bins', 0)}"
+                )
+                murphy["spiegelhalter"] = sz
+                murphy["decile_z"] = dz
+            except Exception as _e:
+                print(f"  Spiegelhalter/decile Z skipped: {_e}")
             if LOG_LOSS_IN_REVIEW:
                 logloss = compute_log_loss(y[mask].values, p[mask].values)
                 print(f"  log-loss (actionable): {logloss:.4f}")
@@ -289,6 +312,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--quotes-csv",
+        type=str,
+        default=None,
+        help=(
+            "Epic 5.4: quote-level CSV for T-60 decision lines (CLV grading only). "
+            "Requires --pbp-tip-csv or tip_utc in toggles; never an actuals train target."
+        ),
+    )
+    p.add_argument(
+        "--pbp-tip-csv",
+        type=str,
+        default=None,
+        help=(
+            "Epic 5.4: raw PBP CSV with game_id + time_actual for authoritative tip UTC. "
+            "Used with --quotes-csv so promotion_eligible can be true."
+        ),
+    )
+    p.add_argument(
+        "--use-rapm",
+        action="store_true",
+        help="Epic 8.2/12.5: fit sparse player RAPM (+ informed L-RAPM) into walk-forward features",
+    )
+    p.add_argument(
+        "--use-epva",
+        action="store_true",
+        help=(
+            "Epic 12.1: enable live zone-EPVA features (default off — MAE regression "
+            "vs rapm_v7 in v8). Prefer calib-hold-MAE candidate without this flag."
+        ),
+    )
+    p.add_argument(
+        "--seed-review-baseline",
+        type=str,
+        default=None,
+        help=(
+            "Copy a prior review_baseline / actuals baseline JSON into this run's "
+            "checkpoints/review_baseline.json before stage 6 (anti-overfit gate)."
+        ),
+    )
+    p.add_argument(
         "--preset",
         choices=("fast",),
         default=None,
@@ -364,6 +427,9 @@ def stage0_toggles(args, run_dir: Path) -> dict:
         "use_venn_abers": bool(getattr(args, "venn_abers", False)),
         "use_rolling_league_z": bool(getattr(args, "rolling_z", False)),
         "allow_tip_proxy": bool(getattr(args, "allow_tip_proxy", False)),
+        "use_rapm_priors": bool(getattr(args, "use_rapm", False)),
+        "use_epva_features": bool(getattr(args, "use_epva", False)),
+        "seed_review_baseline": getattr(args, "seed_review_baseline", None),
         "fast_preset": bool(getattr(args, "fast_preset", False)),
         "research_only": bool(getattr(args, "fast_preset", False)),
         "created_at": _utc_now(),
@@ -562,6 +628,8 @@ def stage3_to_5_walkforward(
         cfg.USE_VENN_ABERS_FILTER = True
     if toggles.get("use_rolling_league_z"):
         cfg.USE_ROLLING_LEAGUE_Z = True
+    if toggles.get("use_epva_features"):
+        cfg.USE_EPVA_FEATURES = True
 
     data_dir = resolve_data_dir(args.data_dir or stints_info.get("data_dir"))
     odds_path = resolve_odds_path(data_dir, REPO_ROOT)
@@ -569,6 +637,25 @@ def stage3_to_5_walkforward(
         raise SystemExit("all_odds.csv not found")
     print(f"Loading odds from {odds_path}...")
     pinnacle_path = resolve_pinnacle_path(data_dir, REPO_ROOT)
+    # Epic 5.4: optional real quotes + PBP tip UTC for CLV grading (not actuals target).
+    quotes_csv = getattr(args, "quotes_csv", None)
+    pbp_tip_csv = getattr(args, "pbp_tip_csv", None)
+    if quotes_csv and pbp_tip_csv:
+        from pipeline.quote_provenance import load_quotes_csv, tip_utc_map_from_pbp
+
+        qpath, tpath = Path(quotes_csv), Path(pbp_tip_csv)
+        if qpath.exists() and tpath.exists():
+            toggles["quotes_df"] = load_quotes_csv(qpath)
+            toggles["tip_utc_map"] = tip_utc_map_from_pbp(pd.read_csv(tpath))
+            print(
+                f"  Epic 5.4 quotes loaded: rows={len(toggles['quotes_df']):,} "
+                f"tips={len(toggles['tip_utc_map']):,} (CLV grading only)"
+            )
+        else:
+            print(
+                f"  ⚠ Epic 5.4 paths missing (quotes={qpath.exists()} "
+                f"pbp_tip={tpath.exists()}); falling through to odds loader gates"
+            )
     sched = (
         stints[["GAME_ID", "game_date", "home_team", "away_team"]]
         .drop_duplicates("GAME_ID")
@@ -623,6 +710,8 @@ def stage3_to_5_walkforward(
         fast_tuning=toggles.get("fast_tuning", False),
         rating_history_use_all=True,
         use_venn_abers_filter=bool(toggles.get("use_venn_abers")),
+        use_rapm_priors=bool(toggles.get("use_rapm_priors")),
+        use_epva_features=bool(toggles.get("use_epva_features")),
     )
     if results is None or results.empty:
         raise SystemExit("Walk-forward produced no results")
@@ -649,6 +738,53 @@ def stage6_review(run_dir: Path, results: pd.DataFrame, pause: bool, yes: bool) 
     summary = _print_scoreboard(df)
     ok, msg = _anti_overfit_gate(df, run_dir=run_dir)
     print(f"  gate: {msg}")
+
+    # Actuals DM vs locked rapm_v7 (per-season pooled HAC) when artifacts exist.
+    dm_vs_rapm_v7 = None
+    try:
+        from pipeline.forecast_eval import diebold_mariano, actuals_scorecard
+
+        root = Path(__file__).resolve().parents[1]
+        v7_pkl = root / "output" / "20260920_215558_baseline_rapm_v7" / "artifacts" / "backtest_results.pkl"
+        if v7_pkl.exists():
+            v7 = pd.read_pickle(v7_pkl)
+            key = "GAME_ID" if "GAME_ID" in df.columns and "GAME_ID" in v7.columns else None
+            if key:
+                merged = df.merge(
+                    v7[[key, "PRED_SPREAD"]].rename(columns={"PRED_SPREAD": "PRED_SPREAD_V7"}),
+                    on=key,
+                    how="inner",
+                )
+            else:
+                merged = None
+            if merged is not None and len(merged) >= 50:
+                y = pd.to_numeric(merged.get("ACTUAL_MARGIN"), errors="coerce")
+                a = pd.to_numeric(merged.get("PRED_SPREAD"), errors="coerce")
+                b = pd.to_numeric(merged.get("PRED_SPREAD_V7"), errors="coerce")
+                seasons = merged.get("simulated_season_window")
+                if seasons is None:
+                    seasons = merged.get("season")
+                dm_vs_rapm_v7 = diebold_mariano(
+                    y, a, b, loss="abs", season_series=seasons,
+                )
+                print(
+                    f"  DM vs rapm_v7 (A=this, B=v7): dm={dm_vs_rapm_v7.get('dm_stat'):.3f} "
+                    f"p={dm_vs_rapm_v7.get('p_value'):.4f} n={dm_vs_rapm_v7.get('n')} "
+                    f"d_bar={dm_vs_rapm_v7.get('mean_loss_diff'):.4f}"
+                )
+                for srow in dm_vs_rapm_v7.get("seasons") or []:
+                    print(
+                        f"    season={srow.get('season')} n={srow.get('n')} "
+                        f"lags={srow.get('lags')} d_bar={srow.get('d_bar'):.4f}"
+                    )
+            card = actuals_scorecard(df)
+            print(
+                f"  actuals_scorecard: MAE={card.get('spread_mae')} "
+                f"Brier={card.get('brier')} Reliability={card.get('reliability')} "
+                f"Spiegelhalter_z={((card.get('spiegelhalter') or {}).get('z'))}"
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠️ DM vs rapm_v7 skipped: {e}")
 
     # CLV integrity: if decision≠close exists among actionable, CLV must be finite.
     act = df
@@ -683,6 +819,7 @@ def stage6_review(run_dir: Path, results: pd.DataFrame, pause: bool, yes: bool) 
     review = {
         "ok": ok, "message": msg, "stability": summary.get("stability", {}),
         "clv": {"n_actionable": n_act, "n_distinct_decision_close": n_dist, "n_finite_clv": n_clv},
+        "dm_vs_rapm_v7": dm_vs_rapm_v7,
         "at": _utc_now(),
     }
     _write_json(_checkpoint_dir(run_dir) / "review.json", review)
@@ -901,6 +1038,25 @@ def stage8_persist(run_dir: Path, results: pd.DataFrame, toggles: dict, stints_i
     print("   Next: review checkpoints/review.json then run_daily.py")
 
 
+def _seed_review_baseline(run_dir: Path, source: str | Path | None) -> Path | None:
+    """Copy a locked actuals/review baseline into checkpoints for anti-overfit compare."""
+    if not source:
+        return None
+    src = Path(source).expanduser().resolve()
+    if not src.exists():
+        raise SystemExit(f"--seed-review-baseline not found: {src}")
+    dest = _checkpoint_dir(run_dir) / "review_baseline.json"
+    payload = json.loads(src.read_text())
+    # Accept either full review.json shape or a stability-only artifact.
+    if "stability" not in payload and "spread_mae_mean" in payload:
+        payload = {"stability": payload, "seeded_from": str(src), "seeded_at": _utc_now()}
+    else:
+        payload = {**payload, "seeded_from": str(src), "seeded_at": _utc_now()}
+    _write_json(dest, payload)
+    print(f"  seeded review_baseline ← {src}")
+    return dest
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_suite_args(argv)
     t0 = time.time()
@@ -941,6 +1097,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if need(0) or not toggles:
         toggles = stage0_toggles(args, run_dir)
+
+    seed_src = getattr(args, "seed_review_baseline", None) or toggles.get("seed_review_baseline")
+    if seed_src and not (_checkpoint_dir(run_dir) / "review_baseline.json").exists():
+        _seed_review_baseline(run_dir, seed_src)
+    elif seed_src:
+        # Re-seed when explicitly requested so gate always uses locked rapm_v7.
+        _seed_review_baseline(run_dir, seed_src)
 
     if need(1):
         stints, stints_info = stage1_stints(args, run_dir, toggles)
