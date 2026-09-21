@@ -237,12 +237,20 @@ class WalkForwardEloCalibrator:
 
     def predict_interval(self, feat: dict, alpha: float = 0.10) -> tuple[float, float, float]:
         pred = self.predict(feat)
-        q = getattr(self, "_resid_q", 12.0)
+        stored = getattr(self, "_residuals", None)
+        if stored is not None and len(stored) >= 20:
+            a = float(alpha)
+            if not np.isfinite(a) or a <= 0.0 or a >= 1.0:
+                a = 0.10
+            q = float(np.quantile(np.abs(stored), 1.0 - a))
+        else:
+            q = getattr(self, "_resid_q", 12.0)
         return pred - q, pred + q, 2.0 * q
 
     def update_residuals(self, residuals: list[float]):
         if len(residuals) >= 20:
-            self._resid_q = float(np.quantile(np.abs(residuals), 0.90))
+            self._residuals = [float(x) for x in residuals]
+            self._resid_q = float(np.quantile(np.abs(self._residuals), 0.90))
 
     def save(self, path: Path | str):
         path = Path(path)

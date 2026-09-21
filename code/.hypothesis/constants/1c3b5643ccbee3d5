@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/lineup_elo.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.002, 0.1, 0.15, 0.9, 1.1, 100.0, 1000.0, 1500.0, 1500, 'a_lineup5_chem', 'a_lineup5_def', 'a_lineup5_off', 'h_lineup5_chem', 'h_lineup5_def', 'h_lineup5_off', 'lineup5_chem_diff', 'lineup5_net', 'lineup5_sample_min', 'nan', 'off', 'rb', 'wb']

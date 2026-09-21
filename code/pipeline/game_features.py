@@ -174,11 +174,27 @@ def build_game_features(
     h_rim_def, h_peri_def, _ = elo_tracker._lineup_rim_peri(home_lineup, h_weights or None)
     a_rim_def, a_peri_def, _ = elo_tracker._lineup_rim_peri(away_lineup, a_weights or None)
 
+    h_mins = a_mins = None
+    if minutes_model is not None:
+        try:
+            h_roster = list(home_lineup) if home_lineup else list(home_starters)
+            a_roster = list(away_lineup) if away_lineup else list(away_starters)
+            h_mins = minutes_model.forecast_team(h_roster) if h_roster else {}
+            a_mins = minutes_model.forecast_team(a_roster) if a_roster else {}
+        except Exception:
+            h_mins = a_mins = None
+
     if epm_tracker is not None:
         # Task 032: `as_of=gdate` -- a future EPM snapshot must never be
         # joinable to this (earlier) game's T-60 features.
-        ho_off = epm_tracker.blend_lineup_off(home_lineup, ho_off, as_of=gdate)
-        ao_off = epm_tracker.blend_lineup_off(away_lineup, ao_off, as_of=gdate)
+        # Epic 7.4: minutes from MinutesForecastModel.forecast_team scale the
+        # EPM blend; missing minutes keep the equal-weight path.
+        ho_off = epm_tracker.blend_lineup_off(
+            home_lineup, ho_off, as_of=gdate, minutes=h_mins,
+        )
+        ao_off = epm_tracker.blend_lineup_off(
+            away_lineup, ao_off, as_of=gdate, minutes=a_mins,
+        )
 
     h_hoff, h_hdef = hier_engine.lineup_rating(home_lineup)
     a_hoff, a_hdef = hier_engine.lineup_rating(away_lineup)
@@ -462,8 +478,9 @@ def build_game_features(
         try:
             h_roster = list(home_lineup) if home_lineup else list(home_starters)
             a_roster = list(away_lineup) if away_lineup else list(away_starters)
-            h_mins = minutes_model.forecast_team(h_roster) if h_roster else {}
-            a_mins = minutes_model.forecast_team(a_roster) if a_roster else {}
+            if h_mins is None or a_mins is None:
+                h_mins = minutes_model.forecast_team(h_roster) if h_roster else {}
+                a_mins = minutes_model.forecast_team(a_roster) if a_roster else {}
             feat["h_proj_starter_minutes"] = float(sum(
                 v for k, v in h_mins.items() if k != "_replacement"
             ))

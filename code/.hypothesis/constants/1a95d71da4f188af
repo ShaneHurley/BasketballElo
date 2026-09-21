@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/utils.py
+# hypothesis_version: 6.141.1
+
+[0.05, 0.15, 0.45, 0.5, 0.85, 0.9, 1.1, 1.3, 15.0, 30.0, 1000000, '"', "'", ',', '-', '/', 'ELO_SCALING_FACTOR', 'HOME_PPP_BOOST', 'K_DEF', 'K_OFF', 'OFFSEASON_REVERSION', 'USAGE_FLOOR', '[', ']', 'assist_split', 'clutch_boost', 'elo_scaling', 'foul_draw_boost', 'garbage_time_weight', 'home_boost', 'k_def', 'k_def_events', 'k_mult_half_life', 'k_off', 'nan', 'offseason_reversion', 'rd_floor', 'tov_penalty', 'tov_rate_threshold', 'usage_floor', 'variance_dampen', 'xppp_actual_blend']

@@ -55,3 +55,18 @@ def test_load_odds_tip_proxy_flag_without_quotes(tmp_path):
     assert prov["quote_source"] == "modern_odds_only"
     assert prov["used_tip_proxy_fallback"] is False
     assert prov.get("promotion_eligible") is False
+
+
+def test_load_odds_tip_proxy_allowed_without_quotes(tmp_path, monkeypatch):
+    pin = tmp_path / "pinnacle.csv"
+    pin.write_text("dummy\n")
+    monkeypatch.setattr(
+        "pipeline.odds_loader.load_pinnacle_lines",
+        lambda *a, **k: {"dummy": {"spread": -3.5}},
+    )
+    monkeypatch.setattr("pipeline.odds_loader.canonicalize_odds_dict", lambda d: d)
+    odds, prov = load_odds_dict(pinnacle_path=pin, allow_tip_proxy=True)
+    assert prov["quote_source"] == "tip_proxy"
+    assert prov["used_tip_proxy_fallback"] is True
+    assert prov.get("promotion_eligible") is False
+    assert "dummy" in odds

@@ -1,4 +1,4 @@
-"""Planted leak canaries for Epic 10.4 (stub — full harness lands with 10.4).
+"""Planted leak canaries for Epic 10.4.
 
 Deliberately leaking components used only by the bench. Never import from
 production prediction paths.
@@ -56,3 +56,25 @@ class FutureOddsQuote:
 
     def is_chronology_broken(self) -> bool:
         return self.close_ts < self.decision_ts
+
+
+@dataclass
+class SliceReuseAttack:
+    """Registers the identical calibration row-id slice with two different
+    calibrators (Task 053 ``calibration_slice_reuse`` leak, replayed).
+
+    The attack succeeds only if the registry accepts both registrations; a
+    guarded registry must raise on the second ``register`` call.
+    """
+
+    row_ids: tuple = (101, 102, 103, 104, 105)
+    target_a: str = "elo_isotonic"
+    target_b: str = "metascore_isotonic"
+
+    def attempt(self, registry) -> None:
+        """Register ``row_ids`` for two distinct targets (duck-typed: any
+        ``CalibrationSliceRegistry``-shaped object with ``register``)."""
+        if self.target_a == self.target_b:
+            raise ValueError("SliceReuseAttack requires two distinct calibrator targets")
+        registry.register(self.target_a, self.row_ids)
+        registry.register(self.target_b, self.row_ids)

@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/chemistry.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.05, 0.08, 0.15, 1.0, 1.1, 80.0, 100.0, 200.0, 'a_chem_duo_net', 'a_chem_net', 'a_chem_trio_net', 'a_onoff_net', 'chem_diff', 'chem_uncertainty', 'duo_off', 'duo_poss', 'h_chem_duo_net', 'h_chem_net', 'h_chem_trio_net', 'h_onoff_net', 'league_xppp', 'nan', 'off', 'off_p', 'on', 'on_off', 'on_p', 'rb', 'trio_off', 'trio_poss', 'wb']

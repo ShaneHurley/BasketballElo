@@ -15,6 +15,17 @@ from pipeline.config import (
 )
 from pipeline.dates import is_valid_timestamp, to_py_date
 
+# Scalar Kalman (Epic 9.1 / P0.5). Named constants — not Optuna-tuned on walk-forward.
+# State is rating μ with variance P = rd². Observation noise falls with possessions;
+# a large PPP innovation inflates P so a shock raises RD versus an expected result.
+KALMAN_Q = 4.0
+# r(1 poss) so K = rd²/(rd²+r) ≈ 0.9 at the default RD (replaces k_base, not stacked).
+KALMAN_R_PER_POSS = (350.0 ** 2) * (1.0 - 0.9) / 0.9
+KALMAN_INNOV_SCALE = 120000.0
+KALMAN_INNOV_THRESHOLD = 0.5
+KALMAN_RD_CAP = 1000.0
+KALMAN_POSS_FLOOR = 1e-9
+
 
 class PlayerRatingTracker:
     """
@@ -22,22 +33,13 @@ class PlayerRatingTracker:
     Maintains μ (rating), RD (uncertainty), and simplified volatility tracking.
     Context-aware stint multipliers use PBP-derived box stats passed via stint_ctx.
 
-    P0.5 (bench_rd_games_played_proxy registry entry, docs-only per plan —
-    no Kalman rewrite here): despite the Glicko-2 naming, ``*_rd`` is
-    **not** a real Glicko-2 uncertainty estimate. It only ever decays
-    multiplicatively toward ``rd_floor`` as a function of *how many times*
-    ``_update_ratings`` has touched a player (see the ``0.99 + 0.02 *
-    min(abs_err, 0.15)`` update in ``_update_ratings`` below, and the
-    inactivity-based inflation in the offseason-reversion path), i.e. it is
-    a games-played/inactivity counter reused as if it carried genuine
-    posterior-variance information. A true Glicko-2/Kalman RD would grow
-    with rating volatility and shrink with informative observations, not
-    merely with elapsed update count. Any feature or calibration group
-    (e.g. ``elo_calibration.py``'s "uncertainty" group,
-    ``h_rating_uncertainty``/``a_rating_uncertainty``) that consumes this
-    value should treat it as a proxy for experience/recency, not as a
-    calibrated confidence interval. See Epic 9.1 (Kalman filter) for the
-    real fix; deliberately out of scope for this fix (see plan phase 0).
+    ``*_rd`` is a scalar Kalman posterior scale (sqrt of variance P) per side
+    (``O_rd``, ``D_rd``, ``D_rim_rd``, ``D_peri_rd``). Each update uses gain
+    ``K = P / (P + r(poss))`` with process noise ``q`` and observation noise
+    decreasing in possessions; a large PPP innovation inflates P so RD can
+    grow after a shock. Inactivity still inflates O/D RD toward
+    ``default_rd``. Features such as ``h_rating_uncertainty`` consume this
+    posterior scale, not a games-played counter.
     """
 
     DEFAULTS = {
@@ -55,6 +57,11 @@ class PlayerRatingTracker:
         "K_DEF": 0.9,
         "k_mult_half_life": K_MULT_HALF_LIFE,
         "rd_floor": 30.0,
+        "rd_cap": KALMAN_RD_CAP,
+        "kalman_q": KALMAN_Q,
+        "kalman_r_per_poss": KALMAN_R_PER_POSS,
+        "kalman_innov_scale": KALMAN_INNOV_SCALE,
+        "kalman_innov_threshold": KALMAN_INNOV_THRESHOLD,
         "garbage_time_weight": GARBAGE_TIME_WEIGHT,
         "clutch_boost": CLUTCH_BOOST,
         "tov_penalty": TOV_PENALTY,
@@ -180,8 +187,9 @@ class PlayerRatingTracker:
                     if last is not None:
                         days = (py_date - last).days
                         if days > 60:
-                            p["O_rd"] = min(350.0, p["O_rd"] * (1 + 0.1 * (days / 7)))
-                            p["D_rd"] = min(350.0, p["D_rd"] * (1 + 0.1 * (days / 7)))
+                            rd_prior = float(self.cfg.get("default_rd", 350.0))
+                            p["O_rd"] = min(rd_prior, p["O_rd"] * (1 + 0.1 * (days / 7)))
+                            p["D_rd"] = min(rd_prior, p["D_rd"] * (1 + 0.1 * (days / 7)))
                 except (TypeError, ValueError):
                     pass
             p["last_date"] = py_date
@@ -305,8 +313,8 @@ class PlayerRatingTracker:
         m = 1.0
         if stint_ctx.get("clutch"):
             m *= self.cfg.get("clutch_boost", 1.0)
-        if stint_ctx.get("garbage"):
-            m *= self.cfg.get("garbage_time_weight", 0.5)
+        # Garbage-time discount lives only in ``_weight_stint`` (P0.8). Applying
+        # it again here produced gt_w² (0.09 at the configured 0.30 weight).
 
         tov_thr = self.cfg.get("tov_rate_threshold", 0.15)
         if side == "home":
@@ -380,6 +388,16 @@ class PlayerRatingTracker:
                       period=1, start_A=0, start_B=0,
                       end_A=0, end_B=0, season_progress=0.5,
                       stint_ctx=None):
+        """Apply one stint's 4-way O/D residual update.
+
+        Signs match ``matchup_rating.residual_update_signs`` / lineup Elo /
+        hierarchical: home O += err_A, away D += -err_A, away O += err_B,
+        home D += -err_B. Non-finite possessions or points skip the update.
+        """
+        if poss is None or not np.isfinite(poss) or poss <= 0:
+            return
+        if not np.isfinite(xpts_A) or not np.isfinite(xpts_B):
+            return
         ast_split = self.cfg.get("assist_split", ASSIST_SPLIT)
 
         def collapse_usage(u_dict):
@@ -443,23 +461,39 @@ class PlayerRatingTracker:
 
         err_A = act_ppp_A - exp_ppp_A
         err_B = act_ppp_B - exp_ppp_B
-        # O/D residual signs documented in matchup_rating.residual_update_signs:
-        # home O gets +err_A; away D gets credit opposite home scoring error.
-
+        if not (
+            np.isfinite(err_A)
+            and np.isfinite(err_B)
+            and np.isfinite(wt_a)
+            and np.isfinite(wt_b)
+        ):
+            return
+        # 4-way contract (matchup_rating.residual_update_signs / lineup_elo /
+        # hierarchical): each side's offense is trained on its own scoring
+        # residual; each side's defense is trained on minus the opponent's.
         self._update_ratings(ids_A, err_A * wt_a, poss, flat_usage_A, side="off", abs_err=abs(err_A))
         self._update_def_split(
-            ids_B, err_B * wt_b, poss, flat_usage_B, wt_b, stint_ctx, "away", abs_err=abs(err_B),
+            ids_B, -err_A * wt_b, poss, flat_usage_B, wt_b, stint_ctx, "away", abs_err=abs(err_A),
         )
+        self._update_ratings(ids_B, err_B * wt_b, poss, flat_usage_B, side="off", abs_err=abs(err_B))
         self._update_def_split(
             ids_A, -err_B * wt_a, poss, flat_usage_A, wt_a, stint_ctx, "home", abs_err=abs(err_B),
         )
-        self._update_ratings(ids_B, -err_A * wt_b, poss, flat_usage_B, side="off", abs_err=abs(err_A))
 
         self._apply_def_event_credit(ids_A, flat_usage_A, poss, stint_ctx, "home", wt_a)
         self._apply_def_event_credit(ids_B, flat_usage_B, poss, stint_ctx, "away", wt_b)
 
         self._accumulate_player_context(ids_A, flat_usage_A, poss, stint_ctx, "home")
         self._accumulate_player_context(ids_B, flat_usage_B, poss, stint_ctx, "away")
+
+    def _side_keys(self, side):
+        if side == "off":
+            return "O_mu", "O_rd", "O_sigma"
+        if side == "def_rim":
+            return "D_rim_mu", "D_rim_rd", None
+        if side == "def_peri":
+            return "D_peri_mu", "D_peri_rd", None
+        return "D_mu", "D_rd", "D_sigma"
 
     def _update_ratings(self, ids, error, poss, usage, side, abs_err=0.0):
         ids = [str(x) for x in ids if x and str(x) != "nan"]
@@ -472,6 +506,13 @@ class PlayerRatingTracker:
         u_floor = self.cfg["USAGE_FLOOR"]
         half_life = self.cfg.get("k_mult_half_life", 15.0)
         rd_floor = self.cfg.get("rd_floor", 30.0)
+        rd_cap = self.cfg.get("rd_cap", KALMAN_RD_CAP)
+        q = float(self.cfg.get("kalman_q", KALMAN_Q))
+        r0 = float(self.cfg.get("kalman_r_per_poss", KALMAN_R_PER_POSS))
+        innov_scale = float(self.cfg.get("kalman_innov_scale", KALMAN_INNOV_SCALE))
+        innov_thr = float(self.cfg.get("kalman_innov_threshold", KALMAN_INNOV_THRESHOLD))
+        r_obs = r0 / max(float(poss), KALMAN_POSS_FLOOR)
+        mu_key, rd_key, sigma_key = self._side_keys(side)
 
         shares = []
         for p in ids:
@@ -486,36 +527,21 @@ class PlayerRatingTracker:
             pl = self._get(p)
             games = self.player_games[p]
             k_mult = max(0.5, 2.0 * math.exp(-games / max(half_life, 1.0)))
-            k_base = self.cfg.get("K_OFF", 0.9) if side == "off" else self.cfg.get("K_DEF", 0.9)
-            if side == "def_rim":
-                rd = pl["D_rim_rd"]
-            elif side == "def_peri":
-                rd = pl["D_peri_rd"]
-            elif side == "off":
-                rd = pl["O_rd"]
-            else:
-                rd = pl["D_rd"]
-            k_effective = k_base * (rd / 350.0)
-            delta = error * k_effective * (shares[i] / s) * k_mult
-
-            if side == "off":
-                pl["O_mu"] += delta
-                rd_new = pl["O_rd"] * (0.99 + 0.02 * min(abs_err, 0.15))
-                pl["O_rd"] = max(rd_floor, min(350.0, rd_new))
-                pl["O_sigma"] = min(0.15, pl["O_sigma"] * (1.0 + 0.05 * min(abs_err, 0.2)))
-            elif side == "def_rim":
-                pl["D_rim_mu"] += delta
-                rd_new = pl["D_rim_rd"] * (0.99 + 0.02 * min(abs_err, 0.15))
-                pl["D_rim_rd"] = max(rd_floor, min(350.0, rd_new))
-            elif side == "def_peri":
-                pl["D_peri_mu"] += delta
-                rd_new = pl["D_peri_rd"] * (0.99 + 0.02 * min(abs_err, 0.15))
-                pl["D_peri_rd"] = max(rd_floor, min(350.0, rd_new))
-            else:
-                pl["D_mu"] += delta
-                rd_new = pl["D_rd"] * (0.99 + 0.02 * min(abs_err, 0.15))
-                pl["D_rd"] = max(rd_floor, min(350.0, rd_new))
-                pl["D_sigma"] = min(0.15, pl["D_sigma"] * (1.0 + 0.05 * min(abs_err, 0.2)))
+            rd = float(pl[rd_key])
+            p_var = rd * rd
+            gain = p_var / (p_var + r_obs) if (p_var + r_obs) > 0.0 else 0.0
+            share = shares[i] / s
+            # Kalman gain replaces k_base * (rd/350); keep games-played k_mult.
+            pl[mu_key] += gain * error * share * k_mult
+            q_eff = q
+            if abs_err > innov_thr:
+                q_eff += innov_scale * (abs_err * abs_err)
+            p_new = (1.0 - gain) * p_var + q_eff
+            pl[rd_key] = max(rd_floor, min(rd_cap, math.sqrt(max(p_new, 0.0))))
+            pl["last_innovation"] = float(error)
+            pl["last_kalman_gain"] = float(gain)
+            if sigma_key is not None:
+                pl[sigma_key] = min(0.15, pl[sigma_key] * (1.0 + 0.05 * min(abs_err, 0.2)))
 
             pl["Possessions"] += poss
             self.player_games[p] += 1

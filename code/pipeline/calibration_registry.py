@@ -101,7 +101,7 @@ BACKTEST_CALIBRATION_TARGETS = (
 
 def chronological_game_id_partition(
     calib_df, targets=BACKTEST_CALIBRATION_TARGETS, date_col: str = "game_date",
-    id_col: str = "GAME_ID",
+    id_col: str = "GAME_ID", min_slice_n: int = 5,
 ) -> dict:
     """Partition ``calib_df``'s ``GAME_ID``s, ordered by ``date_col``, into
     one contiguous, mutually disjoint block per target.
@@ -117,6 +117,9 @@ def chronological_game_id_partition(
     Returns ``{target: np.ndarray of GAME_ID}``, in the same iteration order
     as ``targets``, with sizes as close to equal as possible (any remainder
     games go to the earliest targets).
+
+    Raises ``ValueError`` if any assigned slice has fewer than ``min_slice_n``
+    games (roadmap 7.6). Empty input still returns empty arrays.
     """
     targets = list(targets)
     if calib_df is None or len(calib_df) == 0:
@@ -133,10 +136,17 @@ def chronological_game_id_partition(
     boundaries = [0]
     for s in sizes:
         boundaries.append(boundaries[-1] + s)
-    return {
+    parts = {
         target: ordered_ids[boundaries[i]:boundaries[i + 1]]
         for i, target in enumerate(targets)
     }
+    too_small = {t: len(ids) for t, ids in parts.items() if len(ids) < min_slice_n}
+    if too_small:
+        raise ValueError(
+            f"chronological_game_id_partition: slices below min_slice_n="
+            f"{min_slice_n}: {too_small}"
+        )
+    return parts
 
 
 def slice_by_game_ids(df, game_ids, id_col: str = "GAME_ID"):

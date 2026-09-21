@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/refs.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.25, 100.0, 'ref_foul_bias', 'ref_pace_bias']

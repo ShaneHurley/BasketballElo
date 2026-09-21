@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/stint_context.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.5, 1.0, 'AWAY_SCORE_START', 'CREW_ID', 'HOME_SCORE_START', 'PERIOD', 'away_3pa', 'away_3pa_rate', 'away_blks', 'away_def_events', 'away_fga', 'away_foul_draw_rate', 'away_fouls_drawn', 'away_fta', 'away_luck_ppp', 'away_pts', 'away_rim_fga', 'away_rim_rate', 'away_stl', 'away_tov', 'away_tov_rate', 'away_tovs_forced', 'away_xpts', 'clutch', 'crew_id', 'garbage', 'home_3pa', 'home_3pa_rate', 'home_blks', 'home_def_events', 'home_fga', 'home_foul_draw_rate', 'home_fouls_drawn', 'home_fta', 'home_luck_ppp', 'home_pts', 'home_rim_fga', 'home_rim_rate', 'home_stl', 'home_tov', 'home_tov_rate', 'home_tovs_forced', 'home_xpts', 'margin_start', 'official', 'poss', 'possessions']

@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/structured_score.py
+# hypothesis_version: 6.141.1
+
+[-0.95, 0.0, 1e-06, 0.02, 0.04, 0.08, 0.15, 0.25, 0.95, 1.0, 2.0, 9.0, 'hybrid_away', 'hybrid_home', 'hybrid_margin', 'hybrid_sigma_margin', 'hybrid_sigma_total', 'hybrid_total', 'struct_', 'struct_away_pts', 'struct_home_pts', 'struct_margin', 'struct_score_corr', 'struct_sigma_margin', 'struct_sigma_total', 'struct_total']

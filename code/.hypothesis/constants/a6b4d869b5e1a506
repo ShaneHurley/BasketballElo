@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/team_elo.py
+# hypothesis_version: 6.141.1
+
+[0.02, 0.5, 2.5, 15.0, 20.0, 25.0, 50.0, 225.0, 1500.0, 3000.0, 'games', 'rb', 'spread_mu', 'team_elo_net', 'team_elo_spread', 'team_elo_total_adj', 'total_mu', 'wb']

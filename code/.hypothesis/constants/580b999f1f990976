@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/game_updates.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.3, 0.5, 1.0, 36.0, 'AWAY_SCORE_END', 'AWAY_SCORE_START', 'AWAY_players', 'HOME_SCORE_END', 'HOME_SCORE_START', 'HOME_players', 'PERIOD', 'abovebreak3', 'away', 'away_fta', 'away_pts', 'away_usage', 'away_xpts', 'def_rtg', 'garbage', 'home', 'home_fta', 'home_pts', 'home_usage', 'home_xpts', 'off_rtg', 'possessions', 'process_stint', 'restricted', 'tot_poss', 'update', 'update_pace']

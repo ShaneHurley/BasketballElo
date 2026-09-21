@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/shot_zones.py
+# hypothesis_version: 6.141.1
+
+[0.35, 0.38, 0.4, 0.42, 0.5, 0.64, 2.0, 3.0, 10.0, 14.0, 22.0, 23.0, 23.75, 50.0, 94.0, 100.0, 100, '3', '3|three|3pt', 'EVENTMSGTYPE', 'ab3', 'above', 'abovebreak3', 'area', 'area_detail', 'break', 'coerce', 'corner', 'corner3', 'is_fg_make', 'long', 'long_mid', 'made', 'mid', 'mid2', 'midrange', 'original_x', 'original_y', 'other', 'paint', 'point_value', 'restricted', 'restricted|at rim', 'rim', 'short_mid', 'shot_value', 'shot_zone', 'three', 'x_legacy', 'xlegacy', 'y_legacy', 'ylegacy', 'zone']

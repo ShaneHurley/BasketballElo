@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from pipeline.config import GOOD_BET_EDGE, TEAM_MAP
+from pipeline.devig import DevigError, devig, select_devig_method_from_folds
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. LEAKAGE‑FREE ODDS RETRIEVAL (ONLY PAST DATES)
@@ -303,7 +304,50 @@ def is_single_sided_ml_quote(market_ml_away) -> bool:
     return market_ml_away is None or pd.isna(market_ml_away)
 
 
-def fair_probs_from_ml_pair(market_ml_home, market_ml_away=None) -> tuple[float, float]:
+def _live_devig_method(folds=None, minutes_before_tip=None) -> str:
+    """Pick the live two-way de-vig method (Epic 7.1).
+
+    No walk-forward folds → multiplicative. When folds exist, call
+    :func:`select_devig_method_from_folds` for the *next* fold; thin prior
+    evidence shrinks to Shin (``minutes_before_tip < 120``) or Power.
+    """
+    if not folds:
+        return "multiplicative"
+    mbt = None
+    if minutes_before_tip is not None and pd.notna(minutes_before_tip):
+        try:
+            mbt = float(minutes_before_tip)
+        except (TypeError, ValueError):
+            mbt = None
+        if mbt is not None and not np.isfinite(mbt):
+            mbt = None
+    thin_default = "shin" if (mbt is not None and mbt < 120.0) else "power"
+    # Dummy trailing fold: method for the live quote uses *all* provided
+    # folds as prior history (never the live game's own outcome).
+    chosen, _ = select_devig_method_from_folds(
+        list(folds) + [{"q": [], "outcome": []}],
+        global_default=thin_default,
+    )
+    return chosen[-1] if chosen else thin_default
+
+
+def _apply_two_way_devig(p_home: float, p_away: float, method: str) -> tuple[float, float]:
+    if method == "multiplicative":
+        return devig_two_way(p_home, p_away)
+    try:
+        out = devig([p_home, p_away], method=method)
+        return float(out[0]), float(out[1])
+    except (DevigError, ValueError, TypeError):
+        return devig_two_way(p_home, p_away)
+
+
+def fair_probs_from_ml_pair(
+    market_ml_home,
+    market_ml_away=None,
+    *,
+    folds=None,
+    minutes_before_tip=None,
+) -> tuple[float, float]:
     """Fair home/away win probabilities from actual two-sided ML quotes.
 
     When ``market_ml_away`` is missing, this falls back to a same-price
@@ -317,23 +361,33 @@ def fair_probs_from_ml_pair(market_ml_home, market_ml_away=None) -> tuple[float,
     conservative approximation, not a genuine de-vig — prefer real two-sided
     ``market_ml_away`` prices whenever the odds source provides them, and use
     :func:`is_single_sided_ml_quote` to detect when this fallback fired.
+
+    Two-sided quotes use multiplicative de-vig unless ``folds`` is provided
+    (walk-forward Shin/Power/etc. via :func:`select_devig_method_from_folds`).
+    The last chosen method is stored on ``fair_probs_from_ml_pair.last_method``.
     """
+    method = _live_devig_method(folds=folds, minutes_before_tip=minutes_before_tip)
+    fair_probs_from_ml_pair.last_method = method
     if pd.isna(market_ml_home):
         return 0.5, 0.5
     p_home = implied_probability(market_ml_home)
     if not is_single_sided_ml_quote(market_ml_away):
         p_away = implied_probability(market_ml_away)
-        return devig_two_way(p_home, p_away)
+        return _apply_two_way_devig(p_home, p_away, method)
 
     # Single-sided fallback: negation sums to 1 automatically, so
     # devig_two_way here is a no-op — apply the assumed-vig shrink so the
     # result is never mistaken for a genuinely de-vigged probability.
+    fair_probs_from_ml_pair.last_method = "multiplicative"
     p_away = implied_probability(-market_ml_home)
     fh, fa = devig_two_way(p_home, p_away)
     shrink = float(ASSUMED_SINGLE_SIDED_VIG_SHRINK)
     fh = (1.0 - shrink) * fh + shrink * 0.5
     fa = (1.0 - shrink) * fa + shrink * 0.5
     return fh, fa
+
+
+fair_probs_from_ml_pair.last_method = "multiplicative"
 
 
 def fair_probs_from_home_ml(market_ml_home, market_ml_away=None) -> tuple[float, float]:

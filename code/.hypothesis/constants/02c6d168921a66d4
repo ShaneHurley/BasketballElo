@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/stake_profiles.py
+# hypothesis_version: 6.141.1
+
+[-0.5, -0.25, 0.0, 1e-12, 0.01, 0.05, 0.1, 0.12, 0.2, 0.25, 0.35, 0.4, 0.5, 0.85, 0.95, 0.99, 1.0, 1.45, 2.0, 6.0, 12.0, 24.0, 100.0, 350.0, -110, 150, 400, 2000, 'DATE', 'Home', 'Pass', 'aggressive', 'conservative', 'edge_buffer', 'edge_moderate', 'edge_scaled', 'expected_log_growth', 'kelly_fraction', 'loss', 'max_daily_exposure', 'max_drawdown', 'min_confidence_tier', 'min_score', 'moderate', 'p05_return', 'p10_return', 'prob_loss', 'time_under_water', 'win']

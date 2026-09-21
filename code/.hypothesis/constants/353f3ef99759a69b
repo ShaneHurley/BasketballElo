@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/features.py
+# hypothesis_version: 6.141.1
+
+[-20.0, 0.0, 20.0, 100.0, 2025, 'AWAY_players', 'Building features', 'GAME_ID', 'HOME_players', 'a_elo_def', 'a_elo_off', 'act_a', 'act_h', 'actual_away', 'actual_home', 'actual_margin', 'actual_margin_capped', 'actual_total', 'away_poss', 'away_team', 'away_xpts', 'game_date', 'generate_features', 'h_elo_def', 'h_elo_off', 'home_poss', 'home_team', 'home_win', 'home_xpts', 'market_spread', 'tot_poss']

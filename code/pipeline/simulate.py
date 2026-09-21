@@ -50,8 +50,10 @@ from pipeline.market import (
     american_to_decimal,
     bet_analysis,
     elo_meta_agreement,
+    fair_probs_from_ml_pair,
     spread_kelly_fraction,
 )
+from pipeline.venn_abers import market_implied_inside_interval
 from pipeline.metrics import add_clv_columns, variance_aware_edge_threshold
 from pipeline.model import build_feature_row
 from pipeline.stake_profiles import PROFILES, compute_ml_stake, compute_stake
@@ -890,17 +892,48 @@ def run_simulation(
             direction = "Pass"
 
         from pipeline.config import VENN_ABERS_MAX_WIDTH
+        va_ml_interval = None
         if (
             use_venn_abers_filter
-            and direction != "Pass"
             and confidence_calibrator is not None
-            and hasattr(confidence_calibrator, "venn_abers_width")
+            and (
+                hasattr(confidence_calibrator, "venn_abers_interval")
+                or hasattr(confidence_calibrator, "venn_abers_width")
+            )
         ):
             va_score = conf_score
             if isinstance(va_score, (int, float)):
-                va_w = confidence_calibrator.venn_abers_width(float(va_score))
-                if va_w is not None and va_w > VENN_ABERS_MAX_WIDTH:
+                va_w = None
+                if hasattr(confidence_calibrator, "venn_abers_interval"):
+                    va_iv = confidence_calibrator.venn_abers_interval(float(va_score))
+                    if va_iv is not None:
+                        va_ml_interval = (va_iv[0], va_iv[1])
+                        va_w = va_iv[2]
+                elif hasattr(confidence_calibrator, "venn_abers_width"):
+                    va_w = confidence_calibrator.venn_abers_width(float(va_score))
+                if (
+                    direction != "Pass"
+                    and va_w is not None
+                    and va_w > VENN_ABERS_MAX_WIDTH
+                ):
                     direction = "Pass"
+
+        def _gate_ml_va_interval(side: str) -> str:
+            if (
+                not use_venn_abers_filter
+                or side == "Pass"
+                or va_ml_interval is None
+                or pd.isna(market_ml)
+            ):
+                return side
+            p0, p1 = va_ml_interval
+            fh, fa = fair_probs_from_ml_pair(market_ml, market_ml_away)
+            p_mkt = fh if side == "Home" else fa
+            if not market_implied_inside_interval(p0, p1, p_mkt):
+                return "Pass"
+            return side
+
+        ml_dir = _gate_ml_va_interval(ml_dir)
         actionable = int(direction != "Pass")
 
         elo_meta_agreement_val = elo_meta_agreement(
@@ -1017,6 +1050,9 @@ def run_simulation(
         if ml_dir == "Pass" and ml_explain.get("ml_bet") != "Pass":
             ml_dir = ml_explain["ml_bet"]
             ml_ev = ml_explain.get("ml_ev", ml_ev)
+        ml_dir = _gate_ml_va_interval(ml_dir)
+        if ml_dir == "Pass" and isinstance(ml_explain, dict):
+            ml_explain["ml_bet"] = "Pass"
 
         from pipeline.shared_forecast import emit_shared_forecast_from_feature_row
         shared_fc = emit_shared_forecast_from_feature_row(feat, preds)

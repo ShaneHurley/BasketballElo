@@ -184,9 +184,8 @@ ARTIFACT_SCHEMA_VERSION = 3
 # point preservation, zero-possession stint preservation, GAME_ID stint
 # boundaries).
 PREPROCESSING_SCHEMA_VERSION = 2
-# Bumped for T-60 Phase 1: missing totals stay NaN (no 0.0 sentinel);
-# decision_spread residual training; fail-closed unresolved game dates.
-FEATURE_SCHEMA_VERSION = 3
+# Bumped for Epic 9.1 / P0.5 scalar Kalman RD (player Elo updates).
+FEATURE_SCHEMA_VERSION = 6
 # Bumped for T-60 Phase 1: two-sided ML EV uses real away prices;
 # market_snapshots is the preferred tip/decision source.
 MARKET_SNAPSHOT_SCHEMA_VERSION = 3

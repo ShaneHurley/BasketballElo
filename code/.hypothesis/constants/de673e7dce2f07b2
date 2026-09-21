@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/negative_controls.py
+# hypothesis_version: 6.141.1
+
+[-110.0, -3.5, 1e-09, 0.02, 0.25, 0.5, 1.909, 1.952, 60.0, -110, -105, 2022, 2023, 2024, 2025, 2026, '2025-01-15T19:00:00Z', 'GAME_ID', 'a', 'b', 'banned_present', 'base_metric', 'base_paired_mae', 'baseline_current', 'book', 'close_column_guard', 'close_resid_mae', 'close_spread', 'configs', 'controls', 'decision_missing', 'decision_resid_mae', 'decision_spread', 'detail', 'did not raise', 'direct_score_pair', 'duplicate_game_ids', 'elo_net', 'exp_poss', 'folds', 'g1', 'hier_net', 'home', 'hybrid_score_pair', 'immutable', 'in_play', 'ingestion_timestamp', 'market', 'nan', 'null_mean', 'pace_diff', 'passed', 'pinnacle', 'point', 'price_american', 'price_decimal', 'quote_after_cutoff', 'quote_timestamp', 'seasons', 'seed', 'selected_price', 'side', 'source_timestamp', 'spread', 'swapped_paired_mae', 'test_season', 'train_seasons', 'window']

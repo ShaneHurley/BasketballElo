@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/hapm.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1.1, 80.0, 100.0, 100, '-', 'GAME_ID', 'HOME_players', 'PastOnlyHapmLookup', 'a_hapm_net', 'd:', 'game_date', 'h_hapm_net', 'hapm_net_diff', 'home_xpts', 'nan', 'possessions', 't:']

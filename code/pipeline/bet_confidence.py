@@ -777,16 +777,21 @@ class WalkForwardBetCalibrator:
             "rank_prob": rank_p,
         }
 
-    def venn_abers_width(self, score: float) -> float | None:
+    def venn_abers_interval(self, score: float) -> tuple[float, float, float] | None:
+        """Return ``(p0, p1, width)`` for a confidence score, or None."""
         if self._va_ats_scores is None or self._va_ats_outcomes is None:
             return None
         if len(self._va_ats_scores) < 30:
             return None
         from pipeline.venn_abers import scores_to_interval
-        _, _, _, width = scores_to_interval(
+        p0, p1, _, width = scores_to_interval(
             self._va_ats_scores, self._va_ats_outcomes, np.array([float(score)]),
         )
-        return float(width[0])
+        return float(p0[0]), float(p1[0]), float(width[0])
+
+    def venn_abers_width(self, score: float) -> float | None:
+        interval = self.venn_abers_interval(score)
+        return None if interval is None else interval[2]
 
     def save(self, path: Path | str):
         path = Path(path)

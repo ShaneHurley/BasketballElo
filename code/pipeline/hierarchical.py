@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from collections import defaultdict
 from functools import lru_cache
 
@@ -123,7 +124,7 @@ class HierarchicalPossessionEngine:
 
     def update(self, off_ln, def_ln, pts_off, pts_def, possessions,
                xpts_off=None, xpts_def=None, cb_off=None, cb_def=None):
-        if possessions <= 0:
+        if not math.isfinite(possessions) or possessions <= 0:
             return
         if self.update_mode == "xppp" and xpts_off is not None:
             pts_off = xpts_off
@@ -138,7 +139,7 @@ class HierarchicalPossessionEngine:
     def predict_and_update(self, off_ln, def_ln, pts_off, pts_def, possessions,
                            xpts_off=None, xpts_def=None, cb_off=None, cb_def=None):
         """One predict + state update (avoids double-predict used by eval loops)."""
-        if possessions <= 0:
+        if not math.isfinite(possessions) or possessions <= 0:
             return 0.0, 0.0
         upd_off, upd_def = pts_off, pts_def
         if self.update_mode == "xppp" and xpts_off is not None:

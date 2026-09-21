@@ -36,7 +36,11 @@ def load_odds_provenance(run_id: str | None = None) -> dict | None:
     for base in ([rd] if rd else []) + [OUTPUT_ROOT, STATE_DIR]:
         if base is None:
             continue
-        for name in ("odds_provenance.json", "artifacts/odds_provenance.json"):
+        for name in (
+            "odds_provenance.json",
+            "artifacts/odds_provenance.json",
+            "checkpoints/odds_provenance.json",
+        ):
             p = Path(base) / name
             if p.exists():
                 try:

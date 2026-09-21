@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/devig.py
+# hypothesis_version: 6.141.1
+
+[-20.0, -1e-09, 0.0, 1e-12, 1e-10, 1e-09, 1e-06, 0.05, 0.5, 1.0, 2.0, 4.0, 20.0, 200, 'DEVIG_METHODS', 'DevigError', 'brier_score', 'calibration_error', 'devig', 'log_loss_score', 'loss_sum', 'method', 'multiplicative', 'multiplicative_devig', 'n', 'n_obs', 'nan', 'odds_ratio', 'odds_ratio_devig', 'outcome', 'power', 'power_devig', 'q', 'requested', 'shin', 'shin_devig', 'store_devig_choice']

@@ -126,6 +126,7 @@ def load_odds(schedule_df=None, quotes_df=None, tip_utc_map=None):
         schedule_df=schedule_df,
         quotes_df=quotes_df,
         tip_utc_map=tip_utc_map,
+        allow_tip_proxy=True,
     )
 
 

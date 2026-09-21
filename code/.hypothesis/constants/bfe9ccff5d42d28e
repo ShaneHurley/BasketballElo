@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/matchup_rating.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1e-06, 1e-05, 0.002, 1.0, 2.0, 50.0, 100.0, 110.0, 350.0, 1000.0, 1500.0, 1000, 1480, 1490, 1500, 1520, 1550, 'ELO_SCALING_FACTOR', 'HOME_PPP_BOOST', 'away_offense_error', 'home_offense_error', 'matchup_', 'opp_rim_rate', 'opp_three_rate']

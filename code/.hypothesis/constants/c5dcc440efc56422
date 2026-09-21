@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/feature_utils.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1.1, 1000, 'ELO_SCALING_FACTOR', 'HOME_PPP_BOOST', 'cfg', 'league_xppp', 'rest_0', 'rest_1', 'rest_2', 'rest_3plus']

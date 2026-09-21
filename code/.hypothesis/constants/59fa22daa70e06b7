@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/calibration_metrics.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1e-15, 1e-06, 1.0, 1000000.0, 200, 'bin_hi', 'bin_lo', 'brier', 'intercept', 'lbfgs', 'n', 'nan', 'obs_rate', 'pred_mean', 'reliability', 'resolution', 'slope', 'uncertainty']

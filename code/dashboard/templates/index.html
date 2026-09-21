@@ -1,9 +1,21 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>T-60 Analysis Dashboard · BasketballElo</title>
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem("t60-theme");
+        var preferDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = stored || (preferDark ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
@@ -23,6 +35,10 @@
         <p class="tagline">BasketballElo · leak-aware NBA spread prediction · local research lab</p>
       </div>
       <div class="top-links">
+        <button type="button" class="theme-toggle" id="btn-theme" aria-label="Toggle color theme" title="Toggle light / dark">
+          <span class="theme-label-light">Dark mode</span>
+          <span class="theme-label-dark">Light mode</span>
+        </button>
         <a class="top-link" href="https://shanehurley.github.io/BasketballElo/" target="_blank" rel="noopener">
           Docs site ↗
         </a>
@@ -177,9 +193,18 @@
             <div id="rv-timing" class="timing-grid"></div>
           </section>
 
-          <details class="rv-tech">
-            <summary>Technical details (raw log)</summary>
-            <pre id="rv-log-tail" class="rv-log-tail muted">(log appears while a job is watched)</pre>
+          <details class="rv-tech" open>
+            <summary>Live terminal (raw log — docks with the job)</summary>
+            <div id="rv-terminal-dock" class="rv-terminal-dock">
+              <div class="rv-terminal-bar">
+                <span id="rv-terminal-title">suite log</span>
+                <span>
+                  <button type="button" id="btn-rv-terminal-expand" title="Expand terminal">Expand</button>
+                  <button type="button" id="btn-rv-follow-log" title="Auto-scroll to newest lines">Follow</button>
+                </span>
+              </div>
+              <pre id="rv-log-tail" class="rv-log-tail muted">(log appears while a job is watched)</pre>
+            </div>
           </details>
         </div>
       </div>
@@ -294,9 +319,27 @@
 
     <section id="panel-docs" class="panel" data-panel="docs">
       <div class="docs-layout">
+        <aside class="docs-toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <nav id="docs-toc-nav">
+            <a href="#docs-welcome">Welcome</a>
+            <a href="#docs-evolve">How the code evolves</a>
+            <a href="#docs-what">What this dashboard does</a>
+            <a href="#docs-stages">Pipeline stages</a>
+            <a href="#docs-bench">Formula bench</a>
+            <a href="#docs-health">Model health</a>
+            <a href="#docs-glossary">How to interpret</a>
+            <a href="#docs-deeper">Go deeper</a>
+          </nav>
+          <div class="docs-interact">
+            <button type="button" id="btn-docs-refresh-bench">Refresh bench</button>
+            <button type="button" id="btn-docs-refresh-health">Refresh health</button>
+            <button type="button" id="btn-docs-open-viewer">Open Run Viewer</button>
+          </div>
+        </aside>
         <article class="docs-article">
-          <p class="docs-eyebrow">Documentation</p>
-          <h1 class="docs-title">Welcome to the T-60 Analysis Dashboard</h1>
+          <p class="docs-eyebrow" id="docs-welcome">Documentation</p>
+          <h1 class="docs-title docs-section-anchor">Welcome to the T-60 Analysis Dashboard</h1>
           <p class="docs-lede">
             This is the local control room for <strong>BasketballElo</strong> — a leak-aware,
             walk-forward NBA spread prediction pipeline. It lets you launch training and backtest
@@ -304,7 +347,43 @@
             <code>http://127.0.0.1:8765</code>. Nothing leaves your machine.
           </p>
 
-          <h2>What this dashboard does</h2>
+          <h2 id="docs-evolve" class="docs-section-anchor">How the code evolves</h2>
+          <p class="docs-lede">
+            This lab is not a finished product — it is a living research codebase. New work lands
+            behind tests, leak gates, and the formula bench before it can claim ROI.
+          </p>
+          <ol class="docs-evolve">
+            <li>
+              <span class="when">Phase 0–1</span>
+              <p class="what">
+                Stop the bleeding: P0 correctness fixes and quick wins.
+                <a href="https://shanehurley.github.io/BasketballElo/roadmap/" target="_blank" rel="noopener">Roadmap ↗</a>
+              </p>
+            </li>
+            <li>
+              <span class="when">Phase 2</span>
+              <p class="what">
+                Synthetic formula bench — adversarial invariants, not accuracy tuning.
+                <a href="https://shanehurley.github.io/BasketballElo/pipeline/#synthetic-formula-test-bench-epic-10" target="_blank" rel="noopener">Bench docs ↗</a>
+              </p>
+            </li>
+            <li>
+              <span class="when">Phase 3+</span>
+              <p class="what">
+                Wire unused machinery (Shin, Kelly, Venn-Abers, EPM+minutes), then rating-engine
+                upgrades (Kalman). <a href="https://shanehurley.github.io/BasketballElo/history/" target="_blank" rel="noopener">Project history ↗</a>
+              </p>
+            </li>
+            <li>
+              <span class="when">Always</span>
+              <p class="what">
+                Leak registry stays the source of truth for chronological honesty.
+                <a href="https://shanehurley.github.io/BasketballElo/leaks/" target="_blank" rel="noopener">Leak registry ↗</a>
+              </p>
+            </li>
+          </ol>
+
+          <h2 id="docs-what" class="docs-section-anchor">What this dashboard does</h2>
           <div class="docs-grid">
             <div class="docs-tile">
               <h3>All Data</h3>
@@ -332,7 +411,7 @@
             </div>
           </div>
 
-          <h2>Pipeline stages</h2>
+          <h2 id="docs-stages" class="docs-section-anchor">Pipeline stages</h2>
           <p>
             The full suite runs staged phases (0–8) with an anti-overfit review stop. In brief:
           </p>
@@ -348,22 +427,101 @@
             <li><strong>Walk-forward backtest</strong> — every season predicted using only earlier data.</li>
           </ol>
 
-          <h2>How to interpret the outputs</h2>
+          <h2 id="docs-bench" class="docs-section-anchor">Formula bench</h2>
+          <p class="docs-lede">
+            The <strong>synthetic formula test bench</strong> feeds adversarial fake data through
+            rating and market formulas. It checks mathematical invariants — not NBA prediction
+            accuracy. A green report means the formulas behave under stress; it does not mean the
+            model beats the market.
+          </p>
+          <p class="docs-lede" id="bench-report-lede">Loading formula-bench status…</p>
+          <div id="bench-report" class="docs-tile docs-report" aria-live="polite">
+            <p class="docs-eyebrow">Epic 10</p>
+            <h3>Synthetic formula test bench</h3>
+            <div id="bench-report-body">
+              <p class="health-empty">no bench report yet</p>
+            </div>
+            <p class="help" id="bench-report-help">
+              Expected <code>xfailed</code> items pin unfinished wiring (Epics 7.1–7.4, 5.4, and P0.5)
+              — they are not crashes.
+            </p>
+            <ul class="docs-learn-more">
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/pipeline/#synthetic-formula-test-bench-epic-10" target="_blank" rel="noopener">
+                  Pipeline · Synthetic formula test bench ↗
+                </a>
+              </li>
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/dashboard/" target="_blank" rel="noopener">
+                  Dashboard docs ↗
+                </a>
+              </li>
+              <li>
+                <a href="https://github.com/ShaneHurley/BasketballElo/blob/main/code/tests/synth/README.md" target="_blank" rel="noopener">
+                  Bench README on GitHub ↗
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <h2 id="docs-health" class="docs-section-anchor">Model health</h2>
+          <p class="docs-lede">
+            Live <strong>walk-forward results</strong> from the selected run (All Data run picker),
+            not the synthetic bench. Metrics below summarize the last 30 graded rows when a results
+            CSV exists.
+          </p>
+          <p class="docs-lede" id="health-report-lede">Loading model-health status…</p>
+          <div id="health-report" class="docs-tile docs-report" aria-live="polite">
+            <p class="docs-eyebrow">Epic 7.5</p>
+            <h3>Monitoring &amp; negative controls</h3>
+            <div id="health-honesty" class="health-notice hidden" role="status"></div>
+            <div id="health-report-body">
+              <p class="health-empty">no run results yet</p>
+            </div>
+            <ul class="docs-learn-more">
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/pipeline/" target="_blank" rel="noopener">
+                  Pipeline evaluation ↗
+                </a>
+              </li>
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/leaks/" target="_blank" rel="noopener">
+                  Leak registry ↗
+                </a>
+              </li>
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/math/calibration/" target="_blank" rel="noopener">
+                  Calibration math ↗
+                </a>
+              </li>
+              <li>
+                <a href="https://shanehurley.github.io/BasketballElo/math/staking/" target="_blank" rel="noopener">
+                  Staking math ↗
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <h2 id="docs-glossary" class="docs-section-anchor">How to interpret the outputs</h2>
           <table class="docs-table">
             <thead>
               <tr><th>Metric</th><th>What it tells you</th></tr>
             </thead>
             <tbody>
               <tr><td>Spread / Total MAE</td><td>Average absolute error vs actual margins and totals. Lower is better; compare against the market baseline, not zero.</td></tr>
-              <tr><td>ATS hit rate</td><td>Share of graded against-the-spread picks that covered. Only meaningful on the <em>actionable</em> population after gates.</td></tr>
-              <tr><td>ROI</td><td>Simulated return on actionable bets at standard -110 pricing. Small samples swing wildly — check N first.</td></tr>
-              <tr><td>Interval coverage</td><td>How often actuals land inside the model's prediction interval. Should sit near the nominal level.</td></tr>
+              <tr><td>ATS hit rate</td><td>Share of graded against-the-spread picks that covered. Only meaningful on the <em>actionable</em> population after gates. <a href="https://shanehurley.github.io/BasketballElo/pipeline/" target="_blank" rel="noopener">Learn more ↗</a></td></tr>
+              <tr><td>ROI</td><td>Simulated return on actionable bets at standard -110 pricing. Small samples swing wildly — check N first. <a href="https://shanehurley.github.io/BasketballElo/math/staking/" target="_blank" rel="noopener">Staking ↗</a></td></tr>
+              <tr><td>Interval coverage</td><td>How often actuals land inside the model's prediction interval. Should sit near the nominal level. <a href="https://shanehurley.github.io/BasketballElo/math/calibration/" target="_blank" rel="noopener">Calibration ↗</a></td></tr>
               <tr><td>Brier / Logloss</td><td>Win-probability sharpness and calibration on the ML tab. Lower is better.</td></tr>
-              <tr><td>CLV</td><td>Closing line value. Positive CLV is the strongest evidence a signal is real — but only when the claim gate allows it.</td></tr>
+              <tr><td>CLV</td><td>Closing line value. Positive CLV is the strongest evidence a signal is real — but only when decision ≠ close quotes exist and the claim gate allows it. <a href="https://shanehurley.github.io/BasketballElo/leaks/" target="_blank" rel="noopener">Leak registry ↗</a></td></tr>
+              <tr><td>Formula bench exitstatus</td><td>Pytest exit code from the last <code>pytest -m bench</code> session (0 = clean). Written to <code>output/bench/latest.json</code>. <a href="https://shanehurley.github.io/BasketballElo/pipeline/#synthetic-formula-test-bench-epic-10" target="_blank" rel="noopener">Bench docs ↗</a></td></tr>
+              <tr><td>xfail</td><td>A test that is <em>expected</em> to fail until unfinished wiring lands (e.g. Epic 7.x, 5.4, P0.5). Not a crash; unexpected passes fail CI.</td></tr>
+              <tr><td>Permutation null</td><td>Shuffling actual scores should destroy the model’s MAE advantage. If the null looks as good as the real labels, the signal is suspect. <a href="https://shanehurley.github.io/BasketballElo/leaks/" target="_blank" rel="noopener">Leak registry ↗</a></td></tr>
+              <tr><td>Feature drift</td><td>Live feature means that deviate from training by a large z-score. Requires saved train/live feature tables for the run; otherwise the panel stays empty on purpose.</td></tr>
             </tbody>
           </table>
 
-          <h2>Go deeper</h2>
+          <h2 id="docs-deeper" class="docs-section-anchor">Go deeper</h2>
           <ul class="docs-links">
             <li><a href="https://shanehurley.github.io/BasketballElo/" target="_blank" rel="noopener">Full documentation site ↗</a> — architecture, math, pipeline reference.</li>
             <li><a href="https://github.com/ShaneHurley/BasketballElo/blob/main/code/LEAK_REGISTRY.md" target="_blank" rel="noopener">LEAK_REGISTRY.md ↗</a> — every chronological leak found, documented, and regression-tested.</li>
@@ -384,6 +542,7 @@
     <header>
       <strong>Jobs</strong>
       <span class="drawer-actions">
+        <button type="button" id="btn-jobs-expand" title="Expand drawer like a terminal">Expand</button>
         <button type="button" id="btn-clear-finished-drawer" title="Remove succeeded/failed/cancelled">Clear</button>
         <button type="button" id="jobs-drawer-toggle">Hide</button>
       </span>

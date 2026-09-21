@@ -17,6 +17,10 @@ Examples
 
   # Force rebuild stints after changing basketballData/data
   python run_full_suite.py --stints rebuild --yes
+
+  # FAST research loop (1 season, 3/3/3 trials, stop after stage 6).
+  # Research-only: implies --allow-tip-proxy; must not write production config.py.
+  python run_full_suite.py --preset fast --yes
 """
 from __future__ import annotations
 
@@ -275,7 +279,63 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--venn-abers", action="store_true", help="Enable Venn-Abers filter for this run")
     p.add_argument("--rolling-z", action="store_true", help="Enable rolling league Z features")
     p.add_argument("--skip-odds-gate", action="store_true", help="Skip odds-match fail-closed (debug only)")
+    p.add_argument(
+        "--allow-tip-proxy",
+        action="store_true",
+        help=(
+            "Research-only: allow legacy Pinnacle tip-proxy when quotes+tip UTC "
+            "are missing (quote_source=tip_proxy, promotion_eligible=false). "
+            "Omitted by default (fail-closed). Implied by --preset fast."
+        ),
+    )
+    p.add_argument(
+        "--preset",
+        choices=("fast",),
+        default=None,
+        help=(
+            "fast: research-only 1-season loop — elo/hier/meta trials=3, stop "
+            "after stage 6 (skip persist), promotion_eligible=false, implies "
+            "--allow-tip-proxy. FAST must not write production config.py."
+        ),
+    )
     return p
+
+
+FAST_TRIALS = 3
+FAST_TO_STAGE = 6  # skip policy + persist
+
+
+def apply_cli_preset(args: argparse.Namespace) -> argparse.Namespace:
+    """Force FAST research knobs. Does not persist engines or config.py."""
+    args.fast_preset = getattr(args, "preset", None) == "fast"
+    if not args.fast_preset:
+        if not hasattr(args, "allow_tip_proxy"):
+            args.allow_tip_proxy = False
+        return args
+    args.elo_trials = FAST_TRIALS
+    args.hier_trials = FAST_TRIALS
+    args.meta_trials = FAST_TRIALS
+    args.to_stage = min(int(args.to_stage), FAST_TO_STAGE)
+    args.from_stage = min(int(args.from_stage), FAST_TO_STAGE)
+    if args.stage is not None and int(args.stage) > FAST_TO_STAGE:
+        raise SystemExit(
+            "--preset fast is research-only and stops after stage 6 "
+            "(skip persist; must not write production config.py)."
+        )
+    args.allow_tip_proxy = True
+    if args.years:
+        parts = [p.strip() for p in str(args.years).split(",") if p.strip()]
+        if len(parts) > 1:
+            args.years = parts[-1]
+    elif args.start_season is not None or args.end_season is not None:
+        y = args.end_season if args.end_season is not None else args.start_season
+        args.start_season = y
+        args.end_season = y
+    return args
+
+
+def parse_suite_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return apply_cli_preset(build_parser().parse_args(argv))
 
 
 def stage0_toggles(args, run_dir: Path) -> dict:
@@ -303,6 +363,9 @@ def stage0_toggles(args, run_dir: Path) -> dict:
         "allow_interpolated_dates": bool(getattr(args, "allow_interpolated_dates", False)),
         "use_venn_abers": bool(getattr(args, "venn_abers", False)),
         "use_rolling_league_z": bool(getattr(args, "rolling_z", False)),
+        "allow_tip_proxy": bool(getattr(args, "allow_tip_proxy", False)),
+        "fast_preset": bool(getattr(args, "fast_preset", False)),
+        "research_only": bool(getattr(args, "fast_preset", False)),
         "created_at": _utc_now(),
     }
     _write_json(_checkpoint_dir(run_dir) / "runtime_toggles.json", toggles)
@@ -343,6 +406,7 @@ def stage1_stints(args, run_dir: Path, toggles: dict) -> tuple[pd.DataFrame, dic
         start_season=toggles.get("start_season"),
         end_season=toggles.get("end_season"),
         mini=mini,
+        mini_n=1 if toggles.get("fast_preset") else 2,
     )
     paths = [(y, available[y]) for y in season_keys]
     print(f"Data dir: {data_dir}")
@@ -514,10 +578,15 @@ def stage3_to_5_walkforward(
         modern_odds_path=odds_path,
         pinnacle_path=pinnacle_path,
         schedule_df=sched if not sched.empty else None,
-        # Quote-level + tip map supplied by callers when available; otherwise tip-proxy.
         quotes_df=toggles.get("quotes_df"),
         tip_utc_map=toggles.get("tip_utc_map"),
+        allow_tip_proxy=bool(
+            getattr(args, "allow_tip_proxy", False) or toggles.get("allow_tip_proxy")
+        ),
     )
+    if toggles.get("fast_preset") or getattr(args, "fast_preset", False):
+        odds_prov["promotion_eligible"] = False
+        odds_prov["research_only"] = True
     print(
         f"  odds quote_source={odds_prov.get('quote_source')} "
         f"keys={len(odds_dict):,} tip_proxy={odds_prov.get('used_tip_proxy_fallback')}"
@@ -833,7 +902,7 @@ def stage8_persist(run_dir: Path, results: pd.DataFrame, toggles: dict, stints_i
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = parse_suite_args(argv)
     t0 = time.time()
 
     from pipeline.data_paths import resolve_output_root

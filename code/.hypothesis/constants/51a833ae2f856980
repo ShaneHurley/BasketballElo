@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/epm_priors.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.35, 1.0, 50.0, 1500.0, 'coerce', 'epm', 'epm_blend_off_diff', 'epm_prior_diff', 'observation_date', 'player_id']

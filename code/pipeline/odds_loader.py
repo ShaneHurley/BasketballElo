@@ -1,8 +1,9 @@
 """Odds loading with explicit quote-source provenance (T-60 adversarial fix).
 
 Prefers ``market_snapshots`` + authoritative tip UTC when quote-level rows are
-available. Falls back to legacy ``load_pinnacle_lines`` (tip-proxy) only with an
-explicit ``quote_source=\"tip_proxy\"`` flag for run manifests.
+available. Legacy ``load_pinnacle_lines`` (tip-proxy) is fail-closed: callers
+must pass ``allow_tip_proxy=True``. Provenance then records
+``quote_source=\"tip_proxy\"`` and ``promotion_eligible=false``.
 """
 from __future__ import annotations
 
@@ -22,12 +23,15 @@ def load_odds_dict(
     quotes_df: pd.DataFrame | None = None,
     tip_utc_map: dict | pd.DataFrame | None = None,
     cutoff_minutes: float = 60.0,
+    allow_tip_proxy: bool = False,
 ) -> tuple[dict, dict[str, Any]]:
     """Return ``(odds_dict, provenance)``.
 
     When ``quotes_df`` and ``tip_utc_map`` are both provided, decision lines are
-    taken from ``select_decision_quotes`` (canonical T-60). Otherwise the legacy
-    tip-proxy pinnacle loader is used and ``quote_source`` is ``tip_proxy``.
+    taken from ``select_decision_quotes`` (canonical T-60). Otherwise a Pinnacle
+    file would be a tip-proxy fallback: that path **raises** unless
+    ``allow_tip_proxy=True`` (research-only; ``quote_source=tip_proxy``,
+    ``promotion_eligible=false``).
     """
     odds_dict: dict = {}
     provenance: dict[str, Any] = {
@@ -63,6 +67,13 @@ def load_odds_dict(
             return odds_dict, provenance
 
     if pinnacle_path is not None and Path(pinnacle_path).exists():
+        if not allow_tip_proxy:
+            raise ValueError(
+                "Pinnacle path present without quote-level rows + authoritative "
+                "tip UTC; refusing tip-proxy fallback. Pass allow_tip_proxy=True "
+                "for research-only loads (quote_source=tip_proxy, "
+                "promotion_eligible=false)."
+            )
         pin = load_pinnacle_lines(str(pinnacle_path), schedule_df=schedule_df)
         odds_dict.update(pin)
         provenance["quote_source"] = "tip_proxy"

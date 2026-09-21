@@ -15,20 +15,40 @@
     viewerJobId: null,
     runMode: "configure",
     lastTelemetry: null,
+    theme: document.documentElement.getAttribute("data-theme") || "light",
+    followLog: true,
+    lastLogLen: 0,
   };
 
   const VIEWER_MODULES = new Set([
     "suite_smoke", "suite_custom", "backtest_quick", "player_rating_smoke",
   ]);
 
-  const LIGHT_LAYOUT = {
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#161616", family: "IBM Plex Sans, sans-serif" },
-    xaxis: { gridcolor: "#e0e0e0", zerolinecolor: "#c6c6c6", color: "#6f6f6f" },
-    yaxis: { gridcolor: "#e0e0e0", zerolinecolor: "#c6c6c6", color: "#6f6f6f" },
-    margin: { t: 40, r: 20, b: 40, l: 50 },
-  };
+  function chartColors() {
+    const dark = state.theme === "dark";
+    return {
+      paper: "rgba(0,0,0,0)",
+      plot: "rgba(0,0,0,0)",
+      font: dark ? "#f4f4f4" : "#161616",
+      muted: dark ? "#a8a8a8" : "#6f6f6f",
+      grid: dark ? "#393939" : "#e0e0e0",
+      zero: dark ? "#525252" : "#c6c6c6",
+      line: dark ? "#78a9ff" : "#0f62fe",
+      marker: dark ? "#a6c8ff" : "#0043ce",
+    };
+  }
+
+  function LIGHT_LAYOUT() {
+    const c = chartColors();
+    return {
+      paper_bgcolor: c.paper,
+      plot_bgcolor: c.plot,
+      font: { color: c.font, family: "IBM Plex Sans, sans-serif" },
+      xaxis: { gridcolor: c.grid, zerolinecolor: c.zero, color: c.muted },
+      yaxis: { gridcolor: c.grid, zerolinecolor: c.zero, color: c.muted },
+      margin: { t: 40, r: 20, b: 40, l: 50 },
+    };
+  }
 
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -83,10 +103,27 @@
   }
 
   function mergeLayout(layout) {
-    const L = { ...LIGHT_LAYOUT, ...(layout || {}) };
-    L.xaxis = { ...LIGHT_LAYOUT.xaxis, ...(layout && layout.xaxis) };
-    L.yaxis = { ...LIGHT_LAYOUT.yaxis, ...(layout && layout.yaxis) };
+    const base = LIGHT_LAYOUT();
+    const L = { ...base, ...(layout || {}) };
+    L.xaxis = { ...base.xaxis, ...(layout && layout.xaxis) };
+    L.yaxis = { ...base.yaxis, ...(layout && layout.yaxis) };
     return L;
+  }
+
+  function applyTheme(theme) {
+    const next = theme === "dark" ? "dark" : "light";
+    state.theme = next;
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("t60-theme", next);
+    } catch (e) { /* ignore */ }
+    // Re-render open Plotly charts with the new palette when possible.
+    if (state.tab === "all") renderCharts("all", "#charts-all").catch(() => {});
+    if (state.lastTelemetry) renderTelemetry(state.lastTelemetry);
+  }
+
+  function toggleTheme() {
+    applyTheme(state.theme === "dark" ? "light" : "dark");
   }
 
   // ---- Tabs ----
@@ -101,6 +138,244 @@
     if (tab === "ml") loadMl();
     if (tab === "totals") loadTotals();
     if (tab === "jobs") renderJobsFull();
+    if (tab === "docs") {
+      loadBenchReport();
+      loadHealthReport();
+      initDocsToc();
+    }
+  }
+
+  function healthTag(kind, label) {
+    return `<span class="health-tag health-tag--${kind}">${esc(label)}</span>`;
+  }
+
+  function healthCard(label, value, hint) {
+    return (
+      `<div class="health-card">` +
+      `<div class="label">${esc(label)}</div>` +
+      `<div class="value">${value}</div>` +
+      (hint ? `<div class="hint">${esc(hint)}</div>` : "") +
+      `</div>`
+    );
+  }
+
+  function fileStatusTag(counts) {
+    const failed = counts.failed || 0;
+    const xfailed = counts.xfailed || 0;
+    const error = counts.error || 0;
+    if (failed > 0 || error > 0) return healthTag("fail", "fail");
+    if (xfailed > 0) return healthTag("xfail", "xfail");
+    if ((counts.skipped || 0) > 0 && (counts.passed || 0) === 0) {
+      return healthTag("skip", "skip");
+    }
+    return healthTag("pass", "pass");
+  }
+
+  async function loadBenchReport() {
+    const body = $("#bench-report-body");
+    const lede = $("#bench-report-lede");
+    if (!body) return;
+    try {
+      const data = await api("/api/bench");
+      if (!data.available) {
+        body.innerHTML = `<p class="health-empty">${esc(data.message || "no bench report yet")}</p>`;
+        if (lede) {
+          lede.textContent =
+            "Run pytest -m bench to generate output/bench/latest.json.";
+        }
+        return;
+      }
+      const totals = data.totals || {};
+      const cards = [
+        healthCard("Passed", String(data.passed ?? totals.passed ?? "—"), "Assertions that held"),
+        healthCard("Failed", String(data.failed ?? totals.failed ?? "—"), "Unexpected failures"),
+        healthCard("Xfailed", String(data.xfailed ?? totals.xfailed ?? "—"), "Known unfinished wiring"),
+        healthCard("Skipped", String(data.skipped ?? totals.skipped ?? "—"), "Not collected this run"),
+        healthCard("Exit status", String(data.exitstatus ?? "—"), "0 means pytest exited clean"),
+      ].join("");
+
+      const files = data.files || {};
+      const rows = Object.keys(files)
+        .sort()
+        .map((fpath) => {
+          const c = files[fpath] || {};
+          return (
+            `<tr>` +
+            `<td class="file-col" title="${esc(fpath)}">${esc(fpath)}</td>` +
+            `<td>${c.passed || 0}</td>` +
+            `<td>${c.failed || 0}</td>` +
+            `<td>${c.xfailed || 0}</td>` +
+            `<td>${c.skipped || 0}</td>` +
+            `<td>${fileStatusTag(c)}</td>` +
+            `</tr>`
+          );
+        })
+        .join("");
+
+      const table = rows
+        ? `<div class="docs-data-table-wrap"><table class="docs-data-table">` +
+          `<thead><tr><th>File</th><th>Pass</th><th>Fail</th><th>Xfail</th><th>Skip</th><th>Status</th></tr></thead>` +
+          `<tbody>${rows}</tbody></table></div>`
+        : `<p class="health-empty">No per-file counts in this report.</p>`;
+
+      body.innerHTML =
+        `<div class="health-cards">${cards}</div>` +
+        `<p class="help">Source: <code>${esc(data.source_path || "output/bench/latest.json")}</code>` +
+        ` · written by <code>pytest -m bench</code></p>` +
+        table;
+
+      if (lede) {
+        lede.textContent =
+          `Last bench session exitstatus=${data.exitstatus}` +
+          (data.source_path ? ` · ${data.source_path}` : "") +
+          ".";
+      }
+    } catch (err) {
+      body.innerHTML = `<p class="health-empty">no bench report yet</p>`;
+      if (lede) lede.textContent = "Could not load formula-bench status.";
+    }
+  }
+
+  function fmtHealth(n, digits) {
+    if (n == null || Number.isNaN(n)) return "—";
+    if (typeof n === "number") return n.toFixed(digits != null ? digits : 3);
+    return String(n);
+  }
+
+  async function loadHealthReport() {
+    const body = $("#health-report-body");
+    const lede = $("#health-report-lede");
+    const notice = $("#health-honesty");
+    if (!body) return;
+    try {
+      const rid = state.runId || "latest";
+      const q = new URLSearchParams();
+      if (state.runId) q.set("run_id", state.runId);
+      const data = await api(`/api/health?${q}`);
+
+      if (notice) {
+        if (data.research_only && data.banner_message) {
+          notice.textContent = data.banner_message;
+          notice.classList.remove("hidden");
+        } else {
+          notice.textContent = "";
+          notice.classList.add("hidden");
+        }
+      }
+
+      if (!data.n_rows) {
+        body.innerHTML =
+          `<p class="health-empty">no run results yet</p>` +
+          `<p class="help">Select a run with a results CSV on All Data, or launch a suite smoke.</p>`;
+        if (lede) {
+          lede.textContent = data.results_path
+            ? `Results path exists but has 0 rows: ${data.results_path}`
+            : "No backtest_results.csv for the selected run.";
+        }
+        return;
+      }
+
+      const weekly = data.weekly || {};
+      const noWeekly = weekly.status === "no_data";
+      const cards = noWeekly
+        ? `<p class="health-empty">Weekly report: no graded rows in the last ${data.window || 30} games.</p>`
+        : [
+            healthCard("Games (window)", String(weekly.n_games ?? "—"), `Last ${data.window || 30} rows`),
+            healthCard("Bets", String(weekly.n_bets ?? "—"), "Active non-push ATS bets"),
+            healthCard("ATS %", fmtHealth(weekly.ats_pct, 3), "Cover rate on graded bets"),
+            healthCard("Spread MAE", fmtHealth(weekly.spread_mae, 2), "Lower is better"),
+            healthCard("Mean CLV", fmtHealth(weekly.mean_clv, 3), "Null if CLV column missing"),
+            healthCard(
+              "Underperform alert",
+              weekly.alert_underperformance ? "Yes" : "No",
+              "ATS < 48% with ≥20 bets"
+            ),
+          ].join("");
+
+      const perm = data.permutation || {};
+      let permHtml;
+      if (perm.status === "ok") {
+        const tag = perm.passed
+          ? healthTag("pass", "null destroyed edge")
+          : healthTag("fail", "null retained edge");
+        permHtml =
+          `<div class="health-block">` +
+          `<h4>Permutation null ${tag}</h4>` +
+          `<p>Shuffling actual scores should destroy the model’s MAE advantage. ` +
+          `If the shuffled null is as good as the real labels, treat the signal as suspect.</p>` +
+          `<div class="health-cards">` +
+          healthCard("Base MAE", fmtHealth(perm.base_metric, 3), "Real labels") +
+          healthCard("Null mean MAE", fmtHealth(perm.null_mean, 3), `${perm.n_perm || 20} shuffles`) +
+          healthCard("Pairs", String(perm.n_pairs ?? "—"), "Finite residual pairs") +
+          `</div>` +
+          (perm.detail ? `<p class="help">${esc(perm.detail)}</p>` : "") +
+          `</div>`;
+      } else {
+        permHtml =
+          `<div class="health-block">` +
+          `<h4>Permutation null ${healthTag("missing", "skipped")}</h4>` +
+          `<p>${esc(perm.reason || "Could not compute permutation null.")}</p>` +
+          `</div>`;
+      }
+
+      const drift = data.drift || {};
+      let driftHtml;
+      if (drift.status === "ok") {
+        const drows = (drift.rows || [])
+          .map(
+            (r) =>
+              `<tr>` +
+              `<td>${esc(r.feature)}</td>` +
+              `<td>${fmtHealth(r.train_mean, 3)}</td>` +
+              `<td>${fmtHealth(r.live_mean, 3)}</td>` +
+              `<td>${fmtHealth(r.z_score, 2)}</td>` +
+              `</tr>`
+          )
+          .join("");
+        driftHtml =
+          `<div class="health-block">` +
+          `<h4>Feature drift ${healthTag(drows ? "warn" : "pass", drows ? "flagged" : "none")}</h4>` +
+          (drows
+            ? `<div class="docs-data-table-wrap"><table class="docs-data-table">` +
+              `<thead><tr><th>Feature</th><th>Train mean</th><th>Live mean</th><th>z</th></tr></thead>` +
+              `<tbody>${drows}</tbody></table></div>`
+            : `<p class="health-empty">No features exceeded the drift z-score threshold.</p>`) +
+          `</div>`;
+      } else {
+        driftHtml =
+          `<div class="health-block">` +
+          `<h4>Feature drift ${healthTag("missing", "unavailable")}</h4>` +
+          `<p>${esc(drift.reason || "Feature tables were not saved for this run — drift cannot be computed.")}</p>` +
+          `</div>`;
+      }
+
+      const missing = (data.columns_missing || []).length
+        ? `<p class="help">Missing columns: ${esc((data.columns_missing || []).join(", "))}. ` +
+          `Those metrics show as — rather than zero.</p>`
+        : "";
+
+      body.innerHTML =
+        (typeof cards === "string" && cards.indexOf("health-card") >= 0
+          ? `<div class="health-cards">${cards}</div>`
+          : cards) +
+        missing +
+        permHtml +
+        driftHtml +
+        `<p class="help">Source: <code>${esc(data.results_path || "—")}</code>` +
+        (data.quote_source ? ` · quote_source=${esc(data.quote_source)}` : "") +
+        `</p>`;
+
+      if (lede) {
+        lede.textContent =
+          `Run ${rid} · ${data.n_rows} rows` +
+          (data.quote_source ? ` · quote_source=${data.quote_source}` : "") +
+          ".";
+      }
+    } catch (err) {
+      body.innerHTML = `<p class="health-empty">Could not load model health.</p>`;
+      if (lede) lede.textContent = "Could not load model-health status.";
+      if (notice) notice.classList.add("hidden");
+    }
   }
 
   // ---- Schema forms ----
@@ -545,8 +820,8 @@
         y,
         type: "scatter",
         mode: "lines+markers",
-        line: { color: "#0f62fe", width: 1.5 },
-        marker: { size: 4, color: "#0043ce" },
+        line: { color: chartColors().line, width: 1.5 },
+        marker: { size: 4, color: chartColors().marker },
         hovertemplate: "trial %{pointNumber}: %{y:.3f}<extra></extra>",
       }],
       sparkLayout(),
@@ -568,6 +843,15 @@
     if (pl) pl.textContent = `${pct.toFixed(0)}% complete` + (tel.timing && tel.timing.eta_s != null
       ? ` · about ${fmtDuration(tel.timing.eta_s)} remaining`
       : "");
+    const now = $(".rv-now");
+    if (now) {
+      const live = (tel.status || "").toLowerCase() === "running" || pct > 0 && pct < 100;
+      now.classList.toggle("is-live", !!live);
+    }
+    const termTitle = $("#rv-terminal-title");
+    if (termTitle) {
+      termTitle.textContent = (tel.job_id || state.viewerJobId || "suite") + " · live log";
+    }
 
     const pipe = $("#rv-pipeline");
     if (pipe) {
@@ -633,10 +917,39 @@
 
   async function refreshViewerLog(jobId) {
     try {
-      const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/log?tail=40`);
+      const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/log?tail=80`);
       const el = $("#rv-log-tail");
-      if (el) el.textContent = (data.lines || []).join("\n") || "(empty log)";
+      if (!el) return;
+      const text = (data.lines || []).join("\n") || "(empty log)";
+      const grew = text.length > state.lastLogLen;
+      el.classList.remove("muted");
+      el.textContent = text;
+      state.lastLogLen = text.length;
+      if (state.followLog && grew) {
+        el.scrollTop = el.scrollHeight;
+      }
     } catch (_) {}
+  }
+
+  function initDocsToc() {
+    const nav = $("#docs-toc-nav");
+    if (!nav) return;
+    const links = $$("a", nav);
+    const sections = links
+      .map((a) => document.getElementById((a.getAttribute("href") || "").slice(1)))
+      .filter(Boolean);
+    const onScroll = () => {
+      const y = window.scrollY + 80;
+      let active = sections[0];
+      sections.forEach((sec) => {
+        if (sec.offsetTop <= y) active = sec;
+      });
+      links.forEach((a) => {
+        a.classList.toggle("is-active", a.getAttribute("href") === "#" + (active && active.id));
+      });
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
   }
 
   async function showRunViewer(jobId) {
@@ -755,6 +1068,7 @@
       await loadResults();
       await loadArtifacts();
       await renderCharts("all", "#charts-all");
+      if (state.tab === "docs") await loadHealthReport();
     });
     $("#btn-refresh-runs").addEventListener("click", loadAll);
     $("#results-search").addEventListener("change", () => {
@@ -937,6 +1251,58 @@
       d.classList.toggle("collapsed");
       $("#jobs-drawer-toggle").textContent = d.classList.contains("collapsed") ? "Show" : "Hide";
     });
+    const btnExpand = $("#btn-jobs-expand");
+    if (btnExpand) {
+      btnExpand.addEventListener("click", () => {
+        const d = $("#jobs-drawer");
+        d.classList.remove("collapsed");
+        d.classList.toggle("is-expanded");
+        btnExpand.textContent = d.classList.contains("is-expanded") ? "Shrink" : "Expand";
+        $("#jobs-drawer-toggle").textContent = "Hide";
+      });
+    }
+    const btnTheme = $("#btn-theme");
+    if (btnTheme) btnTheme.addEventListener("click", toggleTheme);
+    const btnTermExpand = $("#btn-rv-terminal-expand");
+    if (btnTermExpand) {
+      btnTermExpand.addEventListener("click", () => {
+        const dock = $("#rv-terminal-dock");
+        if (!dock) return;
+        dock.classList.toggle("is-expanded");
+        btnTermExpand.textContent = dock.classList.contains("is-expanded") ? "Shrink" : "Expand";
+      });
+    }
+    const btnFollow = $("#btn-rv-follow-log");
+    if (btnFollow) {
+      btnFollow.addEventListener("click", () => {
+        state.followLog = !state.followLog;
+        btnFollow.textContent = state.followLog ? "Follow · on" : "Follow · off";
+        if (state.followLog) {
+          const el = $("#rv-log-tail");
+          if (el) el.scrollTop = el.scrollHeight;
+        }
+      });
+      btnFollow.textContent = "Follow · on";
+    }
+    const btnDocsBench = $("#btn-docs-refresh-bench");
+    if (btnDocsBench) btnDocsBench.addEventListener("click", () => loadBenchReport());
+    const btnDocsHealth = $("#btn-docs-refresh-health");
+    if (btnDocsHealth) btnDocsHealth.addEventListener("click", () => loadHealthReport());
+    const btnDocsViewer = $("#btn-docs-open-viewer");
+    if (btnDocsViewer) {
+      btnDocsViewer.addEventListener("click", () => {
+        switchTab("run");
+        setRunMode("viewer");
+        toast("Run Viewer — watch a live suite from Jobs or launch one in Configure", "ok");
+      });
+    }
+    if (window.matchMedia) {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (ev) => {
+        if (!localStorage.getItem("t60-theme")) {
+          applyTheme(ev.matches ? "dark" : "light");
+        }
+      });
+    }
     $("#log-modal-close").addEventListener("click", () => {
       $("#log-modal").classList.add("hidden");
       state.logWatch = null;

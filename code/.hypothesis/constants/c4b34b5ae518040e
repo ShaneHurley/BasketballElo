@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/fatigue.py
+# hypothesis_version: 6.141.1
+
+[0.3, 0.35, 3.0, 7.0, 2000.0, 'a_fatigue_index', 'fatigue_diff', 'h_fatigue_index']

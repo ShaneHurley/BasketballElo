@@ -74,7 +74,7 @@ class LineupEloTracker:
         is trained from its own scoring, and each lineup's ``dff`` is
         trained from what its opponent scored against it.
         """
-        if possessions <= 0:
+        if not np.isfinite(possessions) or possessions <= 0:
             return
         key_a = self._key(off_ids)
         key_b = self._key(def_ids)

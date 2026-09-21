@@ -111,17 +111,49 @@ class EpmPriorTracker:
             return 0.0
         return epm * 50.0  # scale to Elo-like units
 
-    def blend_lineup_off(self, player_ids, internal_off: float, as_of=None) -> float:
+    def blend_lineup_off(
+        self, player_ids, internal_off: float, as_of=None, minutes=None,
+    ) -> float:
         if not self.snapshots:
             return internal_off
-        impacts = [
-            self.scaled_impact(p, as_of=as_of) for p in player_ids
-            if p and not self.missing(p, as_of=as_of)
-        ]
-        if not impacts:
+        ids = [p for p in player_ids if p and not self.missing(p, as_of=as_of)]
+        if not ids:
             return internal_off
-        ext = 1500.0 + float(np.mean(impacts))
-        return (1 - self.blend) * internal_off + self.blend * ext
+        impacts = [self.scaled_impact(p, as_of=as_of) for p in ids]
+
+        weights = None
+        if minutes is not None:
+            w = []
+            complete = True
+            getter = minutes.get if hasattr(minutes, "get") else None
+            for p in ids:
+                mv = getter(p) if getter is not None else None
+                try:
+                    mv_f = float(mv) if mv is not None and pd.notna(mv) else None
+                except (TypeError, ValueError):
+                    mv_f = None
+                if mv_f is None or not np.isfinite(mv_f):
+                    complete = False
+                    break
+                w.append(max(0.0, mv_f))
+            if complete:
+                weights = w
+
+        if weights is None:
+            ext = 1500.0 + float(np.mean(impacts))
+            return (1 - self.blend) * internal_off + self.blend * ext
+
+        wsum = float(sum(weights))
+        if wsum <= 0:
+            ext = 1500.0 + float(np.mean(impacts))
+            return (1 - self.blend) * internal_off + self.blend * ext
+        ext = 1500.0 + float(np.average(impacts, weights=weights))
+        # Starter-load (~36 min) takes the full blend; bench minutes shrink
+        # how much external EPM moves the lineup (Epic 7.4).
+        starter_ref = 36.0
+        avg_min = wsum / len(weights)
+        eff_blend = float(np.clip(self.blend * (avg_min / starter_ref), 0.0, 1.0))
+        return (1 - eff_blend) * internal_off + eff_blend * ext
 
     def feature_dict(self, home_ids, away_ids, ho_off, ao_off, as_of=None):
         if not self.snapshots:

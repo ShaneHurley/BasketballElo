@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/bet_selection.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1e-09, 1.0, 2.0, 5.0, 8.0, 'ACTIONABLE', 'Away', 'CONFIDENCE', 'DIRECTION', 'EDGE', 'EDGE_LEAN', 'Home', 'MARKET_SPREAD', 'Pass', 'WIN_PCT', '_side', 'coerce', 'edge_bucket', 'edge_bucket_ats', 'legacy_tiers', 'min_score', 'nan']

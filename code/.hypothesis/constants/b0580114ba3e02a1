@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/data_paths.py
+# hypothesis_version: 6.141.1
+
+[3.0, 2025, ',', 'BasketballElo', 'DISPLAY_FIRST_LAST', 'Darwin', 'PERSON_ID', 'all_odds.csv', 'basketballData', 'combined-stats\\.csv$', 'darwin', 'display_first_last', 'nba_main_lines.csv', 'nba_players_all.csv', 'output', 'person_id']

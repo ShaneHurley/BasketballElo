@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/promotion_gates.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.005, 0.01, 0.02, 0.05, 0.08, 0.25, 0.45, 0.5, 0.8, 0.95, 0.99, 200, 'brier', 'collapses', 'crps', 'interval_coverage', 'log_loss', 'mae', 'market_error_corr', 'market_spread_mae', 'mean_delta', 'n_seasons', 'nan', 'passed', 'promotion_eligible', 'quote_source', 'score_algebra_ok_pct', 'spread_mae', 'tip_proxy', 'total_mae', 'wins']

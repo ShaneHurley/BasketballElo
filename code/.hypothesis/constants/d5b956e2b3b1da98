@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/shot_quality.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.3, 0.38, 0.4, 0.54, 14.0, 'a_rim_rate', 'a_three_rate', 'a_xefg', 'avg_shot_distance', 'away', 'fga', 'gdate', 'h_rim_rate', 'h_three_rate', 'h_xefg', 'home', 'rim_fga', 'rim_rate', 'rim_rate_diff', 'season', 'shot_dist_sum', 'shot_quality_edge', 'three_fga', 'three_rate', 'three_rate_diff', 'xefg', 'xefg_sum']

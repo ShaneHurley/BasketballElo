@@ -91,3 +91,61 @@ def test_p0_8_q4_modest_margin_no_discount():
     poss = 100.0
     weight = tracker._weight_stint(poss, period=4, margin=10, season_progress=1.0, stint_ctx=None)
     assert weight == pytest.approx(poss, rel=1e-9)
+
+
+@pytest.mark.bench
+def test_process_stint_garbage_discounted_once():
+    """Live-path P0.8 follow-up: ``process_stint`` must not re-apply ``gt_w``.
+
+    ``_weight_stint`` already discounts garbage stints once. ``_context_multiplier``
+    used to multiply ``garbage_time_weight`` again, so a flagged stint was
+    weighted at ``gt_w²`` (0.09 at the configured 0.30). The live applied
+    weight is ``_weight_stint * _context_multiplier``; with other context
+    boosts neutralized that product must equal one ``gt_w``, not two.
+    """
+    tracker = PlayerRatingTracker()
+    gt_w = tracker.cfg["garbage_time_weight"]
+    tracker.cfg["clutch_boost"] = 1.0
+    tracker.cfg["tov_penalty"] = 1.0
+    tracker.cfg["foul_draw_boost"] = 1.0
+    tracker.cfg["variance_dampen"] = 1.0
+    tracker.cfg["k_def_events"] = 0.0
+
+    captured: dict[str, float] = {}
+    orig_weight = tracker._weight_stint
+    orig_ctx = tracker._context_multiplier
+
+    def wrap_weight(*args, **kwargs):
+        captured["wt"] = orig_weight(*args, **kwargs)
+        return captured["wt"]
+
+    def wrap_ctx(*args, **kwargs):
+        m = orig_ctx(*args, **kwargs)
+        captured["ctx"] = m
+        return m
+
+    tracker._weight_stint = wrap_weight
+    tracker._context_multiplier = wrap_ctx
+
+    home = [f"h{i}" for i in range(5)]
+    away = [f"a{i}" for i in range(5)]
+    poss = 100.0
+    tracker.process_stint(
+        home,
+        away,
+        poss,
+        110.0,
+        90.0,
+        period=4,
+        start_A=0,
+        start_B=20,
+        end_A=20,
+        end_B=45,
+        season_progress=1.0,
+        stint_ctx={"garbage": True, "clutch": False},
+    )
+    applied = captured["wt"] * captured["ctx"]
+    assert captured["wt"] == pytest.approx(poss * gt_w, rel=1e-9)
+    assert captured["ctx"] == pytest.approx(1.0, rel=1e-9)
+    assert applied == pytest.approx(poss * gt_w, rel=1e-9)
+    assert applied != pytest.approx(poss * gt_w * gt_w, rel=1e-6)

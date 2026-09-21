@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/market_targets.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.05, 'closing_spread', 'coerce', 'decision_spread', 'market_spread', 'market_total']

@@ -1,0 +1,4 @@
+# file: /tmp/stress_bench.py
+# hypothesis_version: 6.141.1
+
+[1.0, 200, 400, 3000, 'STRESS PASS', '__main__', 'datetime64[D]', 'p1_datetime_groups', 'p1_int_groups', 'p2_round_trip', 'p3_stacker', 'sentinel']

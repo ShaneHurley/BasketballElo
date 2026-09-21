@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/oof.py
+# hypothesis_version: 6.141.1
+
+['fit_max_timestamp', 'n_train', 'n_val', 'train_max_t', 'val_min_t']

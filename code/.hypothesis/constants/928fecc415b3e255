@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/elo_calibration.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1e-06, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 1.0, 1.01, 1.15, 1.35, 1.55, 1.75, 2.0, 3.0, 12.0, 999.0, 100, 120, 200, 300, 350, 800, 'EloCalibrationKnobs', '_resid_q', '_residuals', 'a_rating_uncertainty', 'actual_margin', 'blend_mae', 'clip', 'combined', 'elo_bias', 'elo_calibrator.pkl', 'elo_def_event_rate', 'elo_hier_blend', 'elo_luck_adj_net', 'elo_margin', 'elo_matchup_asym', 'elo_net', 'elo_scale', 'elo_tov_rate', 'elo_uncertainty_adj', 'elo_vs_hier_spread', 'elo_vs_market', 'engine', 'exp_poss', 'game_date', 'h_rating_uncertainty', 'hier_blend_elo', 'hier_blend_hier', 'hier_margin', 'inner_val_mae', 'lineup5_net', 'market', 'market_spread', 'rb', 'team_elo_spread', 'uncertainty', 'uncertainty_diff', 'wb']

@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/odds_loader.py
+# hypothesis_version: 6.141.1
+
+[60.0, 'GAME_ID', 'away', 'date', 'decision_missing', 'decision_point', 'decision_spread', 'game_date', 'home', 'inner', 'market', 'market_snapshots', 'modern_odds_only', 'point', 'price_american', 'promotion_eligible', 'quote_source', 'side', 'spread', 'spread_away', 'spread_away_price', 'spread_home_price', 'tip_proxy', 'warning']

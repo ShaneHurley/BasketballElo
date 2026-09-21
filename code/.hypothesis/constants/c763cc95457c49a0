@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/calibrators.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.01, 0.1, 0.99, 1.0, 12.0, 225.0, 100, 250, 300, 'clip', 'lbfgs']

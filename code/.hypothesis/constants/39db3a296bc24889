@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/ats_classifier.py
+# hypothesis_version: 6.141.1
+
+[0.0, 0.01, 0.1, 0.524, 0.99, 1.0, 24.0, 700.0, 300, 350, 'ACTUAL_MARGIN', 'A_RATING_UNCERTAINTY', 'DECISION_SPREAD', 'ELO_META_AGREEMENT', 'H_RATING_UNCERTAINTY', 'MARKET_SPREAD', 'PRED_SPREAD', 'a_rating_uncertainty', 'ab', 'abs_model_edge', 'actual_margin', 'beta', 'clip', 'coerce', 'decision_missing', 'decision_spread', 'elo_meta_agreement', 'get', 'h_rating_uncertainty', 'isotonic', 'lbfgs', 'market_spread', 'model_edge', 'pred_margin', 'pred_spread', 'rb', 'wb']

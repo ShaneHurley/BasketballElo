@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/ml_calibration.py
+# hypothesis_version: 6.141.1
+
+[1e-09, 0.01, 0.1, 0.5, 0.99, 200, 'ACTUAL_AWAY', 'ACTUAL_HOME', 'CLOSING_SPREAD', 'MARKET_ML', 'MARKET_SPREAD', 'WIN_PROB', 'WIN_PROB_RAW', 'clip', 'coerce', 'get', 'isotonic', 'lbfgs', 'logistic', 'market_ml', 'market_spread', 'ml_calibrator.pkl', 'platt', 'prior_year', 'rb', 'wb']

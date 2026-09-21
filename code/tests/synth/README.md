@@ -26,7 +26,8 @@ frozen ±12 intervals, etc.).
 | `factories.py` | `make_stint`, `make_game`, `make_odds`, `make_player_season` |
 | `presets.py` | Extreme scenarios (`BLOWOUT_60`, `JUICE_EXTREMES`, …) |
 | `canaries.py` | Planted leak signals (Task 10.4 — stub until implemented) |
-| `golden.py` | Seed-locked golden season (Task 10.5 — stub until implemented) |
+| `golden.py` | Seed-locked golden season + stage-output snapshot (Task 10.5.1) |
+| `golden_snapshots/golden_season.json` | Committed golden file (drift gate: `test_bench_golden.py`; regenerate with `pytest tests/test_bench_golden.py --regenerate-golden` + a `FEATURE_SCHEMA_VERSION` bump) |
 | `../test_bench_p0_*.py` | P0 acceptance battery (Task 10.6) |
 
 ## Markers

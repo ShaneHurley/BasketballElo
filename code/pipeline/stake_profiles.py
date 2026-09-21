@@ -68,6 +68,12 @@ def compute_stake(
     """Return bankroll fraction to stake (0 if no bet)."""
     if direction == "Pass":
         return 0.0
+    if (
+        not np.isfinite(edge_pts)
+        or not np.isfinite(cover_prob)
+        or not np.isfinite(juice)
+    ):
+        return 0.0
     cfg = PROFILES[profile]
     if uses_edge_gates():
         thr = profile_edge_threshold(edge_threshold, profile)

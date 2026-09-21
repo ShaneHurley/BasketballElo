@@ -24,8 +24,10 @@ from dashboard.jobs.runner import (
 from dashboard.models import ExportRequest, JobCreate
 from dashboard.paths import load_ui_state, save_ui_state
 from dashboard.services import ats as ats_svc
+from dashboard.services import bench as bench_svc
 from dashboard.services import charts as charts_svc
 from dashboard.services import exports as exports_svc
+from dashboard.services import health as health_svc
 from dashboard.services.job_telemetry import build_job_telemetry
 from dashboard.services import ml as ml_svc
 from dashboard.services import players as players_svc
@@ -258,8 +260,18 @@ def create_app() -> FastAPI:
         save_ui_state(cur)
         return cur
 
+    @app.get("/api/bench")
+    def api_bench():
+        return bench_svc.load_bench_summary()
+
     @app.get("/api/health")
-    def health():
+    def api_model_health(run_id: Optional[str] = None):
+        """Walk-forward model health for the Documentation tab (Epic 7.5)."""
+        rid = None if run_id in (None, "", "latest") else run_id
+        return health_svc.load_model_health(rid)
+
+    @app.get("/api/ping")
+    def api_ping():
         return {"ok": True, "data_dir": str(DASHBOARD_DATA_DIR)}
 
     return app

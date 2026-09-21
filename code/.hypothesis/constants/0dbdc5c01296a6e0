@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/trackers.py
+# hypothesis_version: 6.141.1
+
+[0.0, 1e-09, 0.5, 1.0, 2.0, 4.0, 9.0, 85.0, 100.0, 120.0, 150, 1000, 'ELO_SCALING_FACTOR', 'LEAGUE_TEAM_PACE', 'cfg', 'elo_margin', 'elo_net', 'elo_priors', 'expected_weights', 'high_turnover', 'history', 'league_history', 'league_window', 'league_xppp', 'nan', 'offseason_revert', 'pace_diff', 'pace_mean', 'pace_q10', 'pace_q50', 'pace_q90', 'pace_std', 'pace_var', 'per_team', 'prev_season_weight', 'priors_set', 'rb', 'roll_net_xppp', 'team_history', 'team_window', 'teams', 'top_n', 'turnover_frac', 'turnover_threshold', 'warm_start_games', 'wb', 'window_games', 'window_size']

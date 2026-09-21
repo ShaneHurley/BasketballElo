@@ -1,0 +1,4 @@
+# file: /Users/shurley/Documents/basketball/BasketballElo/code/pipeline/calibration_registry.py
+# hypothesis_version: 6.141.1
+
+['GAME_ID', 'ats_isotonic', 'cover_probability', 'elo_isotonic', 'engine_margin', 'final_margin', 'game_date', 'interval_width', 'metascore_isotonic', 'metawin_isotonic', 'ml_win_probability', 'moneyline', 'spread_cover', 'total_over']
