@@ -310,6 +310,30 @@
     </section>
 
     <section id="panel-jobs" class="panel" data-panel="jobs">
+      <div class="section-card" id="live-runs-card">
+        <div class="toolbar">
+          <h2>Live runs</h2>
+          <button type="button" id="btn-refresh-live-runs">Refresh</button>
+        </div>
+        <p id="live-runs-headline" class="muted">Loading host processes…</p>
+        <div id="live-runs-cards" class="cards"></div>
+        <div class="table-wrap">
+          <table id="live-runs-table">
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>PID</th>
+                <th>Alive</th>
+                <th>Command</th>
+                <th>Log</th>
+                <th>Log age</th>
+              </tr>
+            </thead>
+            <tbody id="live-runs-body"></tbody>
+          </table>
+        </div>
+        <p id="live-runs-meta" class="muted" style="margin-top:8px;font-size:0.75rem"></p>
+      </div>
       <div class="toolbar">
         <h2>Job history</h2>
         <button type="button" id="btn-clear-finished">Clear finished</button>
@@ -403,7 +427,7 @@
             </div>
             <div class="docs-tile">
               <h3>Jobs</h3>
-              <p>A real async job runner with progress, ETA, live logs over SSE, and cancellation.</p>
+              <p>Async job runner plus a Live runs panel for host ablation / calib / watchdog PIDs and logs.</p>
             </div>
             <div class="docs-tile">
               <h3>Honesty banners</h3>
@@ -547,6 +571,7 @@
         <button type="button" id="jobs-drawer-toggle">Hide</button>
       </span>
     </header>
+    <div id="live-runs-drawer" class="live-runs-drawer muted" title="Host ablation / calib / watchdog"></div>
     <div id="jobs-live" class="jobs-list"></div>
   </aside>
 

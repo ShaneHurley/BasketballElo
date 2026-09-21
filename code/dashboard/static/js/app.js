@@ -18,6 +18,7 @@
     theme: document.documentElement.getAttribute("data-theme") || "light",
     followLog: true,
     lastLogLen: 0,
+    liveRuns: null,
   };
 
   const VIEWER_MODULES = new Set([
@@ -137,7 +138,10 @@
     if (tab === "ats") loadAts();
     if (tab === "ml") loadMl();
     if (tab === "totals") loadTotals();
-    if (tab === "jobs") renderJobsFull();
+    if (tab === "jobs") {
+      renderJobsFull();
+      refreshLiveRuns().catch(() => {});
+    }
     if (tab === "docs") {
       loadBenchReport();
       loadHealthReport();
@@ -715,6 +719,89 @@
     return `~${(sec / 3600).toFixed(1)}h`;
   }
 
+  function fmtAge(sec) {
+    if (sec == null || Number.isNaN(sec)) return "—";
+    if (sec < 60) return `${Math.round(sec)}s ago`;
+    if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+    return `${(sec / 3600).toFixed(1)}h ago`;
+  }
+
+  function renderLiveRuns(data) {
+    const headline = $("#live-runs-headline");
+    const cards = $("#live-runs-cards");
+    const body = $("#live-runs-body");
+    const meta = $("#live-runs-meta");
+    const drawer = $("#live-runs-drawer");
+    if (!data || !data.ok) {
+      if (headline) headline.textContent = "Live run status unavailable";
+      return;
+    }
+    const aliveBits = (data.runs || []).filter((r) => r.alive).map((r) => `${r.role} ${r.pid}`);
+    const progress = data.progress || "—";
+    const trial = data.last_trial || "";
+    if (headline) {
+      headline.textContent = trial
+        ? `${progress} · ${trial}`
+        : progress;
+    }
+    if (cards) {
+      cards.innerHTML = [
+        cardHtml("Heartbeat", data.heartbeat_at ? fmtAge(data.heartbeat_age_s) : "—"),
+        cardHtml("Ablation", data.raw && data.raw.ablation_alive ? `PID ${data.raw.ablation_pid}` : "idle"),
+        cardHtml("Watchdog", data.raw && data.raw.watchdog_alive ? `PID ${data.raw.watchdog_pid}` : "idle"),
+        cardHtml("Calib", data.raw && data.raw.calib_alive ? `PID ${data.raw.calib_pid}` : "idle"),
+        cardHtml("Report", data.report_exists ? "yes" : "no"),
+        cardHtml("Prune", data.prune_exists ? "yes" : "no"),
+      ].join("");
+    }
+    if (body) {
+      body.innerHTML = (data.runs || []).map((r) => {
+        const logCell = r.log
+          ? `<code title="${esc(r.log_abs || r.log)}">${esc(r.log)}</code>`
+          : "—";
+        return `<tr>
+          <td><strong>${esc(r.role)}</strong></td>
+          <td>${r.pid != null ? esc(String(r.pid)) : "—"}</td>
+          <td><span class="lr-pill ${r.alive ? "on" : "off"}">${r.alive ? "alive" : "idle"}</span></td>
+          <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.command || "")}">${esc((r.command || "").slice(0, 80))}</td>
+          <td>${logCell}</td>
+          <td>${fmtAge(r.log_age_s)}</td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="6" class="muted">No host runs tracked</td></tr>`;
+    }
+    if (meta) {
+      const bits = [];
+      if (data.status_json) bits.push(`status: ${data.status_json}`);
+      if (data.run_dir) bits.push(`run: ${data.run_dir}`);
+      if (data.heartbeat_at) bits.push(`at ${data.heartbeat_at}`);
+      meta.textContent = bits.join(" · ");
+    }
+    if (drawer) {
+      if (!aliveBits.length) {
+        drawer.innerHTML = `<span class="lr-dead">Host: idle</span> · ${esc(progress)}`;
+      } else {
+        drawer.innerHTML =
+          `<span class="lr-alive">Host: ${esc(aliveBits.join(", "))}</span>` +
+          ` · ${esc((trial || progress).slice(0, 90))}`;
+      }
+    }
+  }
+
+  async function refreshLiveRuns() {
+    try {
+      const data = await api("/api/live_runs");
+      state.liveRuns = data;
+      renderLiveRuns(data);
+    } catch (e) {
+      const drawer = $("#live-runs-drawer");
+      if (drawer) drawer.textContent = "Host status unavailable";
+      if (state.tab === "jobs") {
+        const headline = $("#live-runs-headline");
+        if (headline) headline.textContent = "Could not load /api/live_runs — is the dashboard server up?";
+      }
+    }
+  }
+
   function fmtDuration(sec) {
     if (sec == null || Number.isNaN(sec)) return "—";
     if (sec < 60) return `${Math.round(sec)}s`;
@@ -1245,6 +1332,8 @@
     }
     $("#btn-clear-finished").addEventListener("click", clearFinished);
     $("#btn-clear-finished-drawer").addEventListener("click", clearFinished);
+    const btnLive = $("#btn-refresh-live-runs");
+    if (btnLive) btnLive.addEventListener("click", () => refreshLiveRuns().catch(() => {}));
 
     $("#jobs-drawer-toggle").addEventListener("click", () => {
       const d = $("#jobs-drawer");
@@ -1319,8 +1408,12 @@
     bind();
     await loadModules();
     await refreshJobs();
+    await refreshLiveRuns();
     await loadAll();
     setInterval(refreshJobs, 8000);
+    setInterval(() => {
+      refreshLiveRuns().catch(() => {});
+    }, 15000);
     setInterval(() => {
       if (state.logWatch) refreshLogModal(state.logWatch, false).catch(() => {});
     }, 2500);

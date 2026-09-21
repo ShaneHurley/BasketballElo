@@ -2,7 +2,9 @@
 
 Local FastAPI app under `code/dashboard/` for browsing walk-forward runs, launching suite/backtest jobs, and inspecting ATS / ML / totals calibration — without freezing the UI.
 
-The UI follows the [Carbon Design System](https://carbondesignsystem.com/): IBM Plex Sans, a gray-100 light theme (`#f4f4f4` background, white cards, `#161616` text), blue-60 (`#0f62fe`) primary actions, an 8px spacing grid, and sharp 0-radius rectangles.
+The UI follows the [Carbon Design System](https://carbondesignsystem.com/): IBM Plex Sans, a gray-10 light theme (`#f4f4f4` background, white cards, `#161616` text), blue-60 (`#0f62fe`) primary actions, an 8px spacing grid, and sharp 0-radius rectangles. The dashboard supports **light and dark** modes (header toggle, or system preference when no preference is stored). The MkDocs site uses the same Carbon tokens for both Material light and slate schemes — light mode keeps a white/gray-10 chrome (not the dark Gray-100 header).
+
+The Documentation tab includes an on-page TOC, a short “how the code evolves” timeline, live formula-bench and model-health panels, and links into this docs site. The Run Lab **Viewer** docks a live terminal log that can expand and auto-follow new lines alongside the jobs drawer.
 
 ## Run
 
@@ -54,7 +56,7 @@ The same flag and env var work for the `.command` and `.bat` launchers. When std
 | ML | Win-prob / calibration report |
 | Totals | O/U residual charts |
 | Jobs | History, dismiss, live log via SSE |
-| Documentation | In-app overview: pipeline stages, metric glossary, links to this docs site, `LEAK_REGISTRY.md`, and the roadmap |
+| Documentation | In-app overview with sticky TOC, **how the code evolves** timeline, **formula-bench** + **model-health** panels, metric glossary, and links to this docs site / `LEAK_REGISTRY.md` / roadmap. Light/dark theme toggle in the header. |
 
 ## First-run experience
 

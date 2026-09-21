@@ -41,7 +41,8 @@ python scripts/run_dashboard.py --host 127.0.0.1 --port 8765
 | ATS | Calibration forms, reliability / edge-policy jobs, cover + ROI + CLV charts |
 | ML | Win-prob / calib form + reliability chart |
 | Totals | O/U form + residual charts |
-| Jobs | History, dismiss, **View log** |
+| Jobs | History, dismiss, **View log**, plus **Live runs** (host ablation / calib / watchdog from `output/logs/live_status.json`) |
+| Docs | Documentation |
 
 ## Run Lab (notebook-equivalent)
 
@@ -81,6 +82,9 @@ Heavy jobs use `pipeline_python()` (interpreter that can `import sklearn`) so th
 
 Progress: `dashboard_data/jobs/{id}/progress.json` + SSE `/api/jobs/{id}/events`.  
 Logs: every progress line appends to `job.log`; UI **View log** → `GET /api/jobs/{id}/log?tail=400`.
+
+Host pipeline (ablation / calib_hold_mae_v9 / watchdog outside the dashboard job queue):
+`GET /api/live_runs` reads/refreshes `output/logs/live_status.json` and surfaces PIDs + log paths on the Jobs tab.
 
 ## Chart IDs
 

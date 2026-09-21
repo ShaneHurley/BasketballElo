@@ -29,6 +29,7 @@ from dashboard.services import charts as charts_svc
 from dashboard.services import exports as exports_svc
 from dashboard.services import health as health_svc
 from dashboard.services.job_telemetry import build_job_telemetry
+from dashboard.services import live_runs as live_runs_svc
 from dashboard.services import ml as ml_svc
 from dashboard.services import players as players_svc
 from dashboard.services import runs as runs_svc
@@ -273,6 +274,11 @@ def create_app() -> FastAPI:
     @app.get("/api/ping")
     def api_ping():
         return {"ok": True, "data_dir": str(DASHBOARD_DATA_DIR)}
+
+    @app.get("/api/live_runs")
+    def api_live_runs(refresh: bool = Query(True)):
+        """Host-side ablation / calib / watchdog status for the Live runs panel."""
+        return live_runs_svc.get_live_runs(refresh=refresh)
 
     return app
 
