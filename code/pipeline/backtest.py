@@ -227,6 +227,7 @@ def run_multi_year_backtest_walkforward(
     use_epva_features: bool | None = None,
     rating_history_use_all: bool | None = None,
     use_venn_abers_filter: bool | None = None,
+    tuning_cache_tag: str | None = None,
 ) -> pd.DataFrame:
     """
     True walk-forward backtest with NO data leakage.
@@ -254,6 +255,7 @@ def run_multi_year_backtest_walkforward(
             feature_cols = [c for c in SAFE_FEATURE_COLS if c not in ban]
         else:
             feature_cols = [c for c in feature_cols if c not in ban]
+    meta_cache_tag = tuning_cache_tag
     if n_tuning_trials_meta_win is None:
         n_tuning_trials_meta_win = min(n_tuning_trials_meta, 25)
     stints_df = stints_df.copy()
@@ -535,7 +537,10 @@ def run_multi_year_backtest_walkforward(
         base_features = apply_elo_calibration_df(base_features, elo_calibrator)
         calib_features = apply_elo_calibration_df(calib_features, elo_calibrator)
 
-        best_params = load_cached("meta", train_seasons, train_stints) if use_tuning_cache else None
+        best_params = (
+            load_cached("meta", train_seasons, train_stints, tag=meta_cache_tag)
+            if use_tuning_cache else None
+        )
         if best_params is None:
             print("  ⏳ Tuning MetaScoreModel hyperparameters...")
             best_params = tune_margin_model(
@@ -545,7 +550,7 @@ def run_multi_year_backtest_walkforward(
                 train_target=(model_kwargs or {}).get("train_target", "decision_residual"),
             )
             if use_tuning_cache:
-                save_cached("meta", train_seasons, best_params, train_stints)
+                save_cached("meta", train_seasons, best_params, train_stints, tag=meta_cache_tag)
             param_bounds.record_best(int(test_season), meta_params_for_bounds(best_params))
         else:
             print("  ⚡ Using cached Meta params")
@@ -561,9 +566,24 @@ def run_multi_year_backtest_walkforward(
         )
 
         mk = dict(model_kwargs)
+        overlay_cb = mk.pop("cb_params", None) or {}
+        cb_scale = mk.pop("cb_params_scale", None) or {}
+        cb_merged = dict(best_params.get("cb_params") or {})
+        if cb_scale:
+            if "depth" in cb_merged or "depth_delta" in cb_scale:
+                base_d = int(cb_merged.get("depth", 6))
+                cb_merged["depth"] = max(2, base_d + int(cb_scale.get("depth_delta", -1)))
+            if "l2_leaf_reg" in cb_merged or "l2_leaf_reg_scale" in cb_scale:
+                base_l2 = float(cb_merged.get("l2_leaf_reg", 3.0))
+                cb_merged["l2_leaf_reg"] = base_l2 * float(cb_scale.get("l2_leaf_reg_scale", 1.25))
+            # CatBoost rsm ≈ colsample_bylevel; LightGBM uses colsample_bylevel in xgb path
+            if "rsm" in cb_merged or "colsample_scale" in cb_scale:
+                base_rsm = float(cb_merged.get("rsm", 1.0))
+                cb_merged["rsm"] = max(0.1, min(1.0, base_rsm * float(cb_scale.get("colsample_scale", 0.90))))
+        cb_merged.update(overlay_cb)
         meta_model = MetaScoreModel(
             ridge_alpha=best_params['ridge_alpha'],
-            cb_params=best_params['cb_params'],
+            cb_params=cb_merged,
             huber_epsilon=best_params['huber_epsilon'],
             margin_cap=best_params.get('margin_cap'),
             use_isotonic_calibration=True,
@@ -582,7 +602,10 @@ def run_multi_year_backtest_walkforward(
         )
 
         if tune_total_head:
-            total_params = load_cached("total", train_seasons, train_stints) if use_tuning_cache else None
+            total_params = (
+                load_cached("total", train_seasons, train_stints, tag=meta_cache_tag)
+                if use_tuning_cache else None
+            )
             if total_params is None:
                 print("  ⏳ Tuning total model...")
                 total_params = tune_total_model(
@@ -594,7 +617,7 @@ def run_multi_year_backtest_walkforward(
                     fast_mode=fast_tuning or n_tuning_trials_total <= 5,
                 )
                 if use_tuning_cache:
-                    save_cached("total", train_seasons, total_params, train_stints)
+                    save_cached("total", train_seasons, total_params, train_stints, tag=meta_cache_tag)
                 param_bounds.record_best(int(test_season), meta_params_for_bounds(total_params))
             else:
                 print("  ⚡ Using cached total params")
@@ -754,7 +777,10 @@ def run_multi_year_backtest_walkforward(
                 except Exception as e:  # noqa: BLE001
                     print(f"  ⚠ OOF shared forecast attach skipped: {e}")
 
-            win_params = load_cached("meta_win", train_seasons, train_stints) if use_tuning_cache else None
+            win_params = (
+                load_cached("meta_win", train_seasons, train_stints, tag=meta_cache_tag)
+                if use_tuning_cache else None
+            )
             if win_params is None and n_tuning_trials_meta_win > 0:
                 print("  ⏳ Tuning MetaWin model...")
                 win_params = tune_meta_win_model(
@@ -765,7 +791,7 @@ def run_multi_year_backtest_walkforward(
                     fast_mode=fast_tuning or n_tuning_trials_meta_win <= 5,
                 )
                 if use_tuning_cache:
-                    save_cached("meta_win", train_seasons, win_params, train_stints)
+                    save_cached("meta_win", train_seasons, win_params, train_stints, tag=meta_cache_tag)
             elif win_params is None:
                 win_params = {
                     "C": 0.1,
@@ -920,7 +946,6 @@ def run_multi_year_backtest_walkforward(
             if sim_epva is not None:
                 sim_epva.seed_priors_from_history()
                 sim_epva.bump_offseason(120.0)
-
 
         # Walk-forward thresholds from prior seasons
         edge_thr = 0.0 if not uses_edge_gates() else GOOD_BET_EDGE

@@ -18,7 +18,7 @@ CACHE_DIR = STATE_DIR / "tuning_cache"
 CACHE_VERSION = "2026-06-21-v2"
 
 
-def _seasons_hash(train_seasons, stints_df=None) -> str:
+def _seasons_hash(train_seasons, stints_df=None, tag: str | None = None) -> str:
     # Task 004: fold in the preprocessing/feature/market-snapshot/validation
     # schema versions so any change to those (score/date repair, stint
     # semantics, market snapshot logic, CV logic) produces a different key
@@ -34,17 +34,19 @@ def _seasons_hash(train_seasons, stints_df=None) -> str:
         h.update(str(len(stints_df)).encode())
         if "GAME_ID" in stints_df.columns:
             h.update(str(stints_df["GAME_ID"].nunique()).encode())
+    if tag:
+        h.update(f"tag={tag}".encode())
     return h.hexdigest()[:16]
 
 
-def cache_path(kind: str, train_seasons, stints_df=None) -> Path:
-    key = _seasons_hash(train_seasons, stints_df)
+def cache_path(kind: str, train_seasons, stints_df=None, tag: str | None = None) -> Path:
+    key = _seasons_hash(train_seasons, stints_df, tag=tag)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / f"{kind}_{key}.json"
 
 
-def load_cached(kind: str, train_seasons, stints_df=None):
-    path = cache_path(kind, train_seasons, stints_df)
+def load_cached(kind: str, train_seasons, stints_df=None, tag: str | None = None):
+    path = cache_path(kind, train_seasons, stints_df, tag=tag)
     if not path.exists():
         return None
     try:
@@ -53,6 +55,6 @@ def load_cached(kind: str, train_seasons, stints_df=None):
         return None
 
 
-def save_cached(kind: str, train_seasons, params: dict, stints_df=None):
-    path = cache_path(kind, train_seasons, stints_df)
+def save_cached(kind: str, train_seasons, params: dict, stints_df=None, tag: str | None = None):
+    path = cache_path(kind, train_seasons, stints_df, tag=tag)
     path.write_text(json.dumps(params, indent=2))
