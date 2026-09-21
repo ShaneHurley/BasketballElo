@@ -7,21 +7,23 @@ Ranked by expected model lift and engineering value. Each epic has 3–10 tasks;
 
 ## Execution order
 
-*Source: `master_execution_order_+_completion_plan`. The epics below are listed in
-research-priority order, but the actual build order is dependency-driven, not
-research-priority-driven. Follow this 8-phase sequence instead of working top-to-bottom through
-the epics as numbered.*
+*Source: `master_execution_order_+_completion_plan`, updated 2026-09-19 after smoke
+`tip_proxy` / 0 finite CLV. The epics below are listed in research-priority order, but the
+actual build order is dependency-driven. Follow this phase sequence instead of working
+top-to-bottom through the epics as numbered.*
 
 | Phase | Name | Contents |
 | ----- | ---- | -------- |
-| 0 | Stop the bleeding (remaining P0s) | P0.5 (deferred to Epic 9.1), P0.11 (diagnostic, still open) |
-| 1 | Quick wins | 11.4 (wire `update_residuals`), 11.5 (HAPM real shrink) |
-| 2 | Test bench | Epic 10 (synthetic formula test bench) — must be green before any new feature work |
-| 3 | Wire what exists | Epic 7 (devig/Kelly/VA wiring, EPM+minutes, monitoring, min-sample floors) |
+| 0 | Stop the bleeding (remaining P0s) | **5.4 provenance (promoted P0 after smoke `tip_proxy` / 0 finite CLV)**, P0.11 diagnostic, P0.5 (deferred to Epic 9.1) |
+| 1 | Quick wins | Epic 11 — **landed** (11.1–11.5 / P0.4, P0.6–P0.8, P0.10) |
+| 2 | Test bench | Epic 10 — **landed** (`pytest -m bench` green; remaining xfails are 7.1–7.4, 5.4, P0.5) |
+| 3 | Wire what exists | Epic 7 remaining: 7.1 Shin, 7.2 Kelly, 7.3 VA-ML, 7.4 EPM+minutes, 7.5 dashboard (7.6 **landed**) |
 | 4 | Rating engine | Epics 8, 9, 3 (RAPM unification, Kalman filter, aging curves, dual-window ratings, per-team HCA, season priors) |
+| 4.5 | Possession process (PBP-feasible) | Epic 12.1–12.4, 12.8–12.9 — after 9.1 is in flight; 12.5 waits on 8.2; **not** tracking/NNUE/CFR |
 | 5 | Features | Epics 1, 2 (box derivation, rolling stats, EPM hardening, injury v2, lineup form, advanced stats) |
-| 6 | Market + ML | Epics 4, 5 (ensemble, Huber loss, CV hardening, line shopping, provenance, temporal devig, VA bounds, totals decomp, CVaR staking) |
+| 6 | Market + ML | Epics 4, 5 (ensemble, Huber loss, CV hardening, line shopping, **real quotes**, temporal devig, VA bounds, totals decomp, CVaR staking) |
 | 7 | Platform | Epic 6 (CI hardening, experiment tracking, serving, performance, knowledge sharing, automation) |
+| 8 | Tracking-blocked research | Epic 12.10 only if SportVu/Second Spectrum (or equivalent) is in-repo — otherwise leave closed as blocked |
 
 Each phase gates the next: Phase 0 must be fixed or explicitly deferred before Phase 1; the
 Phase 2 bench suite must be fully green before any Phase 3+ feature work proceeds; Phase 4
@@ -33,14 +35,16 @@ phase-by-phase task tables and "what to run" commands.
 
 | Phase | Done when |
 | ----- | --------- |
-| 0 | All P0s fixed or deferred with reason; bench P0 battery green |
-| 1 | 11.4, 11.5 landed; bench green |
-| 2 | Full bench suite green; CI bench job passes; `pytest -m bench` exits 0 |
-| 3 | All 7.x wired; bench tests prove end-to-end; no regressions |
-| 4 | OOF MAE flat or better; bench invariants green; SHAP audit clean |
+| 0 | Remaining P0s fixed or deferred; **5.4 quotes are not `tip_proxy`** before any promotion claim |
+| 1 | 11.1–11.5 landed; bench green — **done 2026-09-19** |
+| 2 | Full bench suite green; CI bench job passes; `pytest -m bench` exits 0 — **done** (8 strict xfails pin unfinished 7.x / 5.4 / P0.5) |
+| 3 | All 7.x wired; bench xfails converted to real tests; no regressions |
+| 4 | OOF MAE flat or better; bench invariants green; SHAP audit clean; Kalman replaces fake RD |
+| 4.5 | Zone xPPP residuals + possession-origin PPP tensors ablate vs current xPPP; no tracking dependency |
 | 5 | Each feature behind ablation toggle; OOF + SHAP gate passed; bench invariant per feature |
-| 6 | CLV finite and positive; calibration slope in [0.85, 1.15]; provenance gate enforced |
+| 6 | CLV finite and positive **on real quotes**; calibration slope in [0.85, 1.15]; provenance gate enforced |
 | 7 | CI green; Docker image builds; docs site deploys |
+| 8 | Only if tracking data exists; otherwise this phase stays a non-goal |
 
 ---
 
@@ -136,6 +140,12 @@ deferred: 1/11 (P0.5 → Epic 9.1 Kalman). Remaining open: 1/11 (P0.11 diagnosti
   of the configured single 0.3 discount).
 - **Fix:** `elif`-chain the branches with period guards; unit test the four quarter×margin
   combinations.
+- **Follow-up found by bench (10.2.1) then fixed:** the double-apply lived one
+  level up — a `garbage=True` stint got `gt_w` from `_weight_stint` *and again*
+  from `_context_multiplier` in `process_stint` → effective `gt_w²` (0.09).
+  Garbage discount now lives only in `_weight_stint`; `test_process_stint_garbage_discounted_once`
+  pins the live path. Also:
+  `apply_inactivity_decay` already converts `pd.Timestamp` (false alarm).
 
 ### P0.9 — Venn-Abers filter fails open on invalid width *(medium)* — **Fixed** (`test_bench_p0_venn_abers.py`, green)
 - **Evidence:** `venn_abers.py:34-37`: `passes_venn_abers_filter` returns `True` when width is
@@ -151,7 +161,7 @@ deferred: 1/11 (P0.5 → Epic 9.1 Kalman). Remaining open: 1/11 (P0.11 diagnosti
 - **Fix:** rename to `market_spread_raw` until real multi-book de-vig exists (Epic 5.1), or
   drop the column.
 
-### P0.11 — CLV is dead in the latest full run — investigate before trusting ROI *(high, diagnostic)* — **Open** (no `odds_provenance.json` / `n_actionable=0` diagnosis this phase)
+### P0.11 — CLV is dead in the latest full run — investigate before trusting ROI *(high, diagnostic)* — **Diagnosed: provenance, not logic** (`test_bench_p0_clv.py`, green — synthetic decision≠close pairs yield finite, correctly-signed CLV at every layer; dead CLV comes from decision≠close pairs never materializing, i.e. `close_line_conflation`/`quote_tip_proxy`. **Prioritize roadmap 5.4 provenance debt above all other Epic 5 work.**)
 - **Evidence:** `output/20260914_224422_dash_standard/checkpoints/review.json`:
   `n_actionable: 0`, `n_finite_clv: 0`, `mean_clv: NaN` across 5,247 backtest games (spread MAE
   11.51 ± 0.64, ECE 0.065). Likely downstream of the still-`confirmed` `quote_tip_proxy` leak
@@ -179,9 +189,7 @@ isolation but never called from the live pipeline. Integration, not invention.*
   static 0.35 with no in-season decay, `epm_priors.py:27`)
 - [ ] 7.5 Surface `monitoring.py` drift reports + `negative_controls.py` permutation-null
   results on the dashboard (both exist, neither visible anywhere)
-- [ ] 7.6 Add `min_samples` floors: `venn_abers.py` isotonic (currently none — contrast
-  `WalkForwardEloCalibrator min_samples=80`), and `calibration_registry.py` per-slice minimum-N
-  assertion (5-way disjoint split of a small tail currently has no size floor)
+- [x] 7.6 Add `min_samples` floors: `venn_abers.py` isotonic (`len(scores_cal) < 10` raises), and `calibration_registry.py` per-slice `min_slice_n=5`. `predict_interval` honors `alpha`. P0.5 RD remains open (Epic 9.1).
 
 ## Epic 8 — Unify the n-man synergy estimators *(new)*
 
@@ -192,9 +200,10 @@ tier-weighted additive) all feed the stacker simultaneously, plus a `lineup_comp
 by construction.*
 
 - [ ] 8.1 **Blocked on P0.1** (fix the input possession stream first)
-- [ ] 8.2 Single sparse regularized possession-level regression (RAPM/PIPM-style): one design
+- [x] 8.2 Single sparse regularized possession-level regression (RAPM/PIPM-style): one design
   matrix, one regularization path, consistent n-aware shrinkage for player/duo/trio
   coefficients; replace `hapm.py` + `chemistry.py` duo/trio pieces
+  *(landed player RAPM in `pipeline/rapm.py`; HAPM/chemistry still coexist pending 8.4 ablation)*
 - [ ] 8.3 Keep `lineup_elo.py` 5-man James-Stein as the top tier over the unified base
 - [ ] 8.4 Ablation gate: unified features vs the current triple-redundant set on OOF MAE/log-loss
 
@@ -307,8 +316,9 @@ paste into the agent prompt. The "Adversarial check" field is what the reviewer 
 attempt. See "Fleet orchestration design" below for how these are dispatched.*
 
 ### Task 10.1 — Synthetic data factory layer (partially done)
-- [ ] 10.1.1 — Extend factories with game-sequence and season builders *(scaffold has
-  make_stint/make_game/make_odds; needs make_game_sequence and make_season)*
+- [x] 10.1.1 — Extend factories with game-sequence and season builders *(done —
+  `make_game_sequence` + `make_season` with provably-terminating no-self-game repair;
+  `make_stint`/`make_odds` schema-completed for parity)*
   - **File:** `code/tests/synth/factories.py` (extend)
   - **Add:** `make_game_sequence(n_games, teams, start_date, seed)` → list of game dicts with
     realistic date spacing (1-3 days apart); `make_season(teams, n_games_per_team, seed)` →
@@ -323,7 +333,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Acceptance:** `test_bench_factories.py` extended with determinism + chronology +
     no-self-game tests, all green.
 - [x] 10.1.2 — Preset library *(done — 8 presets exist)*
-- [ ] 10.1.3 — Schema-parity test
+- [x] 10.1.3 — Schema-parity test *(done — dynamic parity via `build_stints` on minimal pbp + functional odds parity through six `market.py` builders; mutation-verified)*
   - **File:** `code/tests/test_bench_schema_parity.py` (new)
   - **Change:** Run `make_stint()` output through the same column checks `stints.py` applies
     (required columns present, dtypes match). Run `make_odds()` output through `market.py`'s
@@ -338,7 +348,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
 - [x] 10.1.4 — README *(done)*
 
 ### Task 10.2 — Stage-by-stage formula invariant battery
-- [ ] 10.2.1 — `test_bench_ratings.py`
+- [x] 10.2.1 — `test_bench_ratings.py` *(done — 14 green + 1 strict-xfail for P0.5; surfaced two new findings below)*
   - **File:** `code/tests/test_bench_ratings.py` (new)
   - **Invariants to test:**
     1. **Home/away symmetry:** Create two identical stints with teams swapped. Feed stint A to
@@ -381,7 +391,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
     49 possessions (< 50) should return 0 from `_duo_net` regardless of raw value.
   - **Acceptance:** shrinkage test green; mirrored-update and on/off tests are `xfail` (red)
     until P0.1 lands.
-- [ ] 10.2.3 — `test_bench_market.py`
+- [x] 10.2.3 — `test_bench_market.py` *(done — 32 green; adversarial finding: Gaussian/Skellam 0.02 agreement holds only for half-integer lines — integer lines carry push-mass offset ~0.044, and `spread_cover_prob` floors sigma at 4.0; both boundaries pinned in tests)*
   - **File:** `code/tests/test_bench_market.py` (new)
   - **Invariants to test:**
     1. **Devig sums to 1 (P0.3):** For 100 random two-sided ML pairs, assert `devig_two_way`
@@ -402,7 +412,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
     sum-to-1 invariant hold? Test Skellam with sigma=0.1 (near-degenerate) — does it crash or
     return a sensible value?
   - **Acceptance:** all green (or `xfail` for P0.3/P0.10 until those fixes land).
-- [ ] 10.2.4 — `test_bench_calibration.py`
+- [x] 10.2.4 — `test_bench_calibration.py` *(done — 7.6 floors enforced; P0.4 interval + P0.9 fail-closed still green)*
   - **File:** `code/tests/test_bench_calibration.py` (new)
   - **Invariants to test:**
     1. **Interval responds to residuals (P0.4):** Covered by 11.4's test.
@@ -421,7 +431,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Adversarial check:** Feed isotonic 2 points with identical scores but different labels —
     does it produce a sensible probability or a degenerate step?
   - **Acceptance:** all green or `xfail` with documented reason.
-- [ ] 10.2.5 — `test_bench_staking_grading.py`
+- [x] 10.2.5 — `test_bench_staking_grading.py` *(done — 18 green; residual risks documented in-file: NaN `edge_pts` bypasses the edge gate and NaN stakes leak to NaN profit — candidates for a fail-closed hardening pass in Epic 7.2)*
   - **File:** `code/tests/test_bench_staking_grading.py` (new)
   - **Invariants to test:**
     1. **Stake ≥ 0 always:** For 1000 random (cover_prob, juice, edge) combinations, assert
@@ -444,7 +454,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
 
 ### Task 10.3 — Property-based testing (Hypothesis)
 - [x] 10.3.1 — Add hypothesis to dev deps *(done in scaffold)*
-- [ ] 10.3.2 — `test_bench_properties.py`
+- [x] 10.3.2 — `test_bench_properties.py` *(done — 8 green; 3 Hypothesis properties derandomized + 3000-example stress hunts clean; no pipeline bugs found)*
   - **File:** `code/tests/test_bench_properties.py` (new)
   - **Properties to test:**
     1. **PastOnlyGroupCV:** For random group arrays (varying cardinality, duplicates, tiny
@@ -467,7 +477,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
 - [x] 10.3.4 — Flake control *(done in scaffold via CI settings)*
 
 ### Task 10.4 — Leak canary harness
-- [ ] 10.4.1 — Canaries *(stub exists in `code/tests/synth/canaries.py`)*
+- [x] 10.4.1 — Canaries *(done — `SliceReuseAttack` added; all four canaries exercised)*
   - **File:** `code/tests/synth/canaries.py` (extend)
   - **Add:** `PsychicFeature.attach(df)` (exists), `TimeTravelerTracker` (exists),
     `FutureOddsQuote` (exists). Add `SliceReuseAttack` — attempts to register the same
@@ -478,7 +488,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Adversarial check:** Verify each canary actually triggers its target gate (not just
     exists).
   - **Acceptance:** canary classes exist and are exercised by tests.
-- [ ] 10.4.2 — Gate-catches-canary tests
+- [x] 10.4.2 — Gate-catches-canary tests *(done — `test_bench_canaries.py`, 4 green; each gate's rejection reason verified leak-specific via adversarial probes)*
   - **File:** `code/tests/test_bench_canaries.py` (new)
   - **Tests:**
     1. `PastOnlyGroupCV` rejects a `TimeTravelerTracker`-style row ordering (train on future).
@@ -493,7 +503,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Adversarial check:** Verify each canary is actually leaking (not just mislabeled) by
     confirming the gate's rejection reason matches the leak type.
   - **Acceptance:** all canary tests green.
-- [ ] 10.4.3 — Chronology-tamper harness
+- [x] 10.4.3 — Chronology-tamper harness *(done — `test_bench_chronology.py`, 4 green; SHA-256 over per-row hashes catches row/column permutation; identical-row swap documented as acceptable)*
   - **File:** `code/tests/test_bench_chronology.py` (new)
   - **Test:** Compute SHA-256 of a synthetic dataset. Permute row order. Assert hash differs.
     (This is the harness for roadmap 4.5.3.)
@@ -502,7 +512,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
     changes. This is the tamper-detection harness for roadmap task 4.5.3. Use
     `@pytest.mark.bench`."
   - **Acceptance:** hash changes on permutation; hash stable on identical re-generation.
-- [ ] 10.4.4 — Per-stage permutation nulls
+- [x] 10.4.4 — Per-stage permutation nulls *(done — `test_bench_permutation.py`, 4 green; all four engines show real-label signal r=0.51–0.73 dropping to noise under label shuffle; hierarchical needs public-API `k_off=1.0` for MSE calibration — documented in-file)*
   - **File:** `code/tests/test_bench_permutation.py` (new)
   - **Test:** For each rating engine (Elo, hierarchical, lineup, chemistry), shuffle outcome
     labels and assert the engine's predictive signal drops to noise level.
@@ -513,7 +523,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Acceptance:** all engines show signal destruction under permutation.
 
 ### Task 10.5 — Golden-master differential oracles
-- [ ] 10.5.1 — Golden season generator
+- [x] 10.5.1 — Golden season generator *(done — `golden.py` extended, golden at `tests/synth/golden_snapshots/golden_season.json` w/ FEATURE_SCHEMA_VERSION=5 after the player-Elo 4-way residual-sign fix)*
   - **File:** `code/tests/synth/golden.py` (extend)
   - **Add:** `generate_golden_season(seed=20260919)` → 40-game synthetic season DataFrame;
     `snapshot_stage_outputs(season_df)` → dict of stage outputs (ratings, features, probs,
@@ -525,7 +535,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Adversarial check:** Verify two calls with the same seed produce identical snapshots;
     verify changing a formula constant changes the snapshot.
   - **Acceptance:** golden file committed; regeneration is deterministic.
-- [ ] 10.5.2 — Differential checks
+- [x] 10.5.2 — Differential checks *(done — `test_bench_differential.py`; 4-method devig scoped to sharp/typical books, Skellam↔Gaussian monotone convergence, static-vs-rolling bounds + variance-only control; exact-gap pins noted for softening in the review-fix plan)*
   - **File:** `code/tests/test_bench_differential.py` (new)
   - **Tests:** (1) All four `devig.py` methods agree within 0.01 on 2-way books; (2) Skellam vs
     Gaussian cover probs converge as sigma → 50; (3) `fit_static` vs
@@ -536,7 +546,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
     `replay_rolling_spread_calibration` divergence is bounded and documented. Use
     `@pytest.mark.bench`."
   - **Acceptance:** all differential checks green.
-- [ ] 10.5.3 — Golden diff CI gate
+- [x] 10.5.3 — Golden diff CI gate *(done — CI bench job runs `tests/test_bench_*.py` including `test_bench_golden.py`)*
   - **File:** `.github/workflows/ci.yml` (extend)
   - **Add:** A step that runs the golden-master comparison and fails if any numeric drift is
     detected without a corresponding `FEATURE_SCHEMA_VERSION` bump.
@@ -561,7 +571,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
   - **Note:** P0.5 (RD as games-played counter) is a design issue, not a one-line fix — its
     test belongs in `test_bench_ratings.py` (10.2.1) as the "RD responds to outcome surprise"
     invariant, marked `xfail` until Epic 9.1 (Kalman) lands.
-- [ ] 10.6.2 — P0.11 CLV synthetic fixture
+- [x] 10.6.2 — P0.11 CLV synthetic fixture *(done — `test_bench_p0_clv.py`, 11 tests green; verdict: provenance failure, not pipeline logic)*
   - **File:** `code/tests/test_bench_p0_clv.py` (new)
   - **Test:** Create synthetic odds with `decision_spread=-3.5, closing_spread=-5.0`. Run the
     CLV computation path. Assert `point_clv` is finite and equals `decision - close = 1.5`.
@@ -574,7 +584,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
 
 ### Task 10.7 — CI & reporting integration
 - [x] 10.7.1 — Bench CI job *(done in scaffold)*
-- [ ] 10.7.2 — Bench summary report
+- [x] 10.7.2 — Bench summary report *(done — `pytest_sessionfinish` writes `output/bench/latest.json`; `dashboard/services/bench.py` + Documentation tab)*
   - **File:** `code/tests/test_bench_report.py` (new) + `code/dashboard/services/bench.py`
     (new)
   - **Change:** A pytest sessionfinish hook that writes `output/bench/latest.json` with
@@ -585,7 +595,7 @@ attempt. See "Fleet orchestration design" below for how these are dispatched.*
     `code/dashboard/services/bench.py` that reads this file and returns a summary dict. Wire it
     into the dashboard Documentation tab."
   - **Acceptance:** JSON report written after bench run; dashboard displays it.
-- [ ] 10.7.3 — Coverage gate
+- [x] 10.7.3 — Coverage gate *(done — CI bench job emits `output/bench/coverage.json`)*
   - **File:** `.github/workflows/ci.yml` (extend)
   - **Add:** `pytest --cov=pipeline --cov-report=term-missing --cov-report=json:output/bench/coverage.json`
     to the bench CI step.
@@ -972,14 +982,217 @@ of a Kalman gain. Implement as Epic 9.1 and close this task when it lands.*
 
 ---
 
+## Epic 12 — Possession process, bounded rationality, and informed-prior impact *(new)*
+
+*Source: 2026-09-19 synthesis of EPV / non-stationary MDP / QRE / Deep CFR / NNUE+MCTS /
+TD+Shapley / DARKO padding+Kalman / RAPM / market CV — **mapped onto what this repo actually
+has** (PBP stints, `shot_zones.py`, hierarchical n-man, planned Kalman/RAPM). Optical tracking,
+Stockfish-style NNUE, live MCTS rollouts, and poker Deep CFR are **blocked non-goals** until
+SportVu/Second Spectrum (or equivalent) is in the data tree. Do not start those tasks.*
+
+*Why this epic exists now: smoke `output/20260919_183528_baseline_smoke_v5` is research-only
+(`quote_source=tip_proxy`, `n_finite_clv=0`, 0 actionable bets, MAE ~11.9, ECE ~0.05). More Elo
+K-factor / MetaScore Optuna will not create a market edge. The useful ideas in that literature
+are process-over-outcome, shot-clock/possession-origin non-stationarity, humans-are-not-Nash,
+synergy that is already partly in chemistry/HAPM, Empirical Bayes padding, informed-prior RAPM,
+and possession-type totals. Chess/poker engine ports are the wrong next sprint.*
+
+*Duplicates (do not rebuild): 2.5 padding, 2.4/9.1 Kalman, 8.2 RAPM, 3.6 Markov, 1.8 shot-quality
+rolling, 4.4 Monte Carlo, 5.6 Skellam totals. Epic 12 either **feeds those tasks** or adds the
+missing process residual / policy / leverage layer on top.*
+
+### Task 12.1 — Zone xPPP value-added (Actual − Expected) as walk-forward features
+
+Revolutionary metrics isolate process from outcome: `PlayerValue = Actual − Expected` under
+identical conditions (Cervone EPV; soccer xG). We already compute walk-forward zone FG% in
+`shot_zones.py`. We do **not** yet credit the residual as a player/team feature, so the model
+still treats a contested miss and an open miss as the same binary.
+
+- [x] 12.1.1 From existing zone taxonomy (`restricted`/`paint`/`short_mid`/`midrange`/`corner3`/
+  `abovebreak3`), emit per-player and per-team `xppp_taken`, `ppp_actual`, `epva = actual − xppp`
+  on a past-only rolling window (same T-60 isolation as other rolling features)
+  *(landed `pipeline/epva.py` team rolling EPVA; wire live PBP shot aggregation into sim loop next)*
+- [x] 12.1.2 Split EPVA into **decision** (zone mix vs league-average policy) vs **execution**
+  (makes vs zone xFG%). Decision is the QRE-adjacent signal; execution is the luck-heavy one
+  and must be Empirical-Bayes padded (see 12.6 / 2.5)
+- [x] 12.1.3 Bench: `test_bench_epva_sign.py` — a shooter who only takes restricted-area shots
+  that miss still has **higher** decision-EPVA than a shooter who only takes heavily
+  below-xPPP midrange; execution-EPVA of the misser is negative. Leak canary: future-zone-%
+  must not enter `xppp_taken`
+  *(covered by `tests/test_bench_epva.py`)*
+- **Files:** `code/pipeline/shot_zones.py`, new `code/pipeline/epva.py`, `feature_builder.py`,
+  `code/tests/test_bench_epva_sign.py`
+- **Acceptance:** ablation toggle `USE_EPVA`; OOF MAE/log-loss vs current xPPP-only; SHAP
+  audit; `FEATURE_SCHEMA_VERSION` bump + golden regen. Overhaul: **medium**.
+
+### Task 12.2 — Possession-origin PPP tensors (extends 3.6; non-stationary MDP-lite)
+
+Basketball transition dynamics are not a single matrix: a steal-created possession is not a
+dead-ball inbound. Shot clock is **not in stints today** (`grep` is empty), so do not invent a
+24-second tensor. Use what PBP actually has: period, score margin, possession origin.
+
+- [ ] 12.2.1 Classify stint/PBP possessions into origin buckets: live-ball TO / dead-ball /
+  offensive rebound / after-make / after-made-FT. Estimate per-team PPP and pace by bucket
+  with past-only counts
+- [ ] 12.2.2 Period-sliced transition matrices (Q1–Q3 vs Q4/OT) as the non-stationary axis we
+  *can* identify without shot clock. This is the 3.6 deliverable, not a second Markov module
+- [ ] 12.2.3 Counterfactual hook for totals: `E[points] = Σ_origin P(origin) × PPP(origin)` vs
+  current Skellam/score-pair heads (decision gate shared with 3.6.3 / 5.6)
+- [ ] 12.2.4 Bench: planted live-ball-TO team must raise predicted pace **and** PPP vs a
+  half-court clone; origin labels must not use post-possession points
+- **Files:** `code/pipeline/` PBP ingest + new `possession_origin.py`; extend 3.6 rather than
+  fork. Overhaul: **medium**. Blocked on: 3.6 issue #37 (same workstream — implement once).
+
+### Task 12.3 — QRE-lite shot policy (humans are not Nash)
+
+Nash / CFR assumes hyper-rational mixed strategies. QRE says errors happen, and they are
+cheaper when the cost of the mistake is small (contested midrange with 18s on the clock). We
+cannot solve extensive-form basketball. We **can** measure how far a lineup's shot policy sits
+from the xPPP-maximizing policy.
+
+- [ ] 12.3.1 Policy residual: `qre_gap = E[xPPP | actual zone mix] − E[xPPP | greedy zone mix
+  available in the same game context]` using only box/PBP zone frequencies (no tracking
+  "available" — proxy with team zone attempt mix vs opponent-allowed mix)
+- [ ] 12.3.2 Fatigue interaction: raise `qre_gap` weight on B2B / high-fatigue (reuse
+  `fatigue.py` / 9.3). This is the honest version of "LeBron pull-up 3 on a B2B" without a
+  live MCTS
+- [ ] 12.3.3 Bench: a team that over-attempts midrange vs a clone that shoots the opponent's
+  allowed-zone mix must get a worse `qre_gap`; feature must be past-only
+- **Files:** `code/pipeline/qre_policy.py`, `fatigue.py` consumer. Overhaul: **medium**.
+  Do **not** implement Deep CFR, information sets, or regret matching — those are 12.10.
+
+### Task 12.4 — Leverage-weighted evidence (TD-style A(s,a) proxy)
+
+Sloan-style TD valuation says an offensive rebound in the clutch is not the same event as one
+in Q1. We already garbage-time-downweight stints (P0.8 / 11.2 landed). We do not upweight
+high-leverage stints, and `_weight_stint` still cannot see a real win-probability state.
+
+- [ ] 12.4.1 Define a cheap state value `V(s)` from score margin + seconds remaining +
+  possession (logistic / already-used clutch helpers). Stint evidence weight ∝
+  `|ΔV|` with a cap so Q4 blowouts do not dominate
+- [ ] 12.4.2 Keep garbage-time discount; leverage is the **other** tail. Do not double-apply
+  (bench: a 20-point Q4 stint stays downweighted; a 2-point Q4 stint is upweighted vs Q1)
+- [ ] 12.4.3 This is **not** a new DRL trainer. No replay buffer, no neural V(s). Scalar
+  heuristic first; only revisit neural TD after 9.1 Kalman is real
+- **Files:** `code/pipeline/ratings.py` `_weight_stint`, clutch helpers, `test_bench_leverage_weight.py`
+- **Acceptance:** P0.8 tests still pass; new leverage tests; no live-loop change to K that
+  Optuna can secretly retune. Overhaul: **small–medium**. Complements 9.3 (fatigue).
+
+### Task 12.5 — Informed prior for RAPM (does not replace 8.2)
+
+Ridge RAPM with a zero prior is the collinearity bandage. L-RAPM / DPM use Kalman-stabilized
+box priors as the ridge offset. **8.2 is the regression. This task is only the prior.**
+
+- [x] 12.5.1 After 9.1 + 2.5 exist, pass padded box + Kalman state as `β_prior` into 8.2
+  instead of shrinking to 0
+  *(landed via player-RAPM π + `y'=y-Xπ` in `LineupRapmTracker`; full box/Kalman π wiring still open)*
+- [x] 12.5.2 Early-season canary: n<200 stint-possessions must not produce superstar-scale
+  RAPM; prior must dominate
+  *(bench: `test_informed_prior_residualization_recovers_prior_on_sparse_lineup`)*
+- **Blocked on:** #65 (8.2), #67 (9.1), #33 (2.5). Overhaul: **small** once those land;
+  **large** if attempted first. Do not start this before 8.2.
+
+### Task 12.6 — Padding method for 3P / FT (implements 2.5, does not fork it)
+
+Medvedovsky padding: `stabilized = (makes + k·league%) / (att + k)`, with k≈240 for 3PA.
+This is already roadmap 2.5 (#33). Epic 12 only adds the **process split**: pad **execution**
+EPVA (12.1.2), leave **decision** EPVA less padded (volume of attempts is the skill).
+
+- [ ] 12.6.1 Land 2.5 with a documented k per stat (3P, FT, and zone FG%) chosen on a
+  designated config-tuning season — not by peeking at walk-forward MAE
+- [ ] 12.6.2 Bench: 20/40 3P start must not project as a 50% shooter; padded mean in
+  [league−ε, observed]
+- **Issue:** implement on #33, not a new GitHub issue. Overhaul: **small**.
+
+### Task 12.7 — Possession-type totals vs the book (blocked on 5.4)
+
+Totals = pace × (off_eff_A + off_eff_B). Live-ball TO rate × transition PPP is the
+structural mismatch sportsbooks are slowest to move on — **only measurable against real
+quotes**. Smoke proved we currently have `tip_proxy` and 0 finite CLV.
+
+- [ ] 12.7.1 After 5.4 + 12.2, compare origin-decomposed projected total vs closing total;
+  log residual by origin (not a new bet type until CLV is finite)
+- [ ] 12.7.2 Player-residual CV (assists noisier than rebounds) as a **totals uncertainty**
+  feature, not a prop-betting engine. No prop market work until spread CLV is alive
+- **Blocked on:** #24 (5.4), #57 (P0.11). Overhaul: **medium** after quotes; **do not start**.
+
+### Task 12.8 — Fast research loop (suite cost)
+
+Smoke MetaScore Optuna was ~6 min/trial; a 15-trial inner loop is a 90-minute tax per
+head per season. That is why the 2021–2024 suite was killed mid-first-season. Process
+features need a cheap inner loop or they will never be ablated honestly.
+
+- [ ] 12.8.1 `FAST` suite preset: 1 season, 3 Optuna trials, no persist, no promotion path;
+  still writes `quote_source` + `promotion_eligible=false`
+- [ ] 12.8.2 Bench/CI already covers formula; FAST is for feature ablation only. Full suite
+  remains the promotion gate
+- **Files:** `code/run_full_suite.py`, `code/pipeline/config.py` (no leak: FAST must not
+  write tuned constants into production config). Overhaul: **small**. Complements 6.5.
+
+### Task 12.9 — Synergy that is not neural Shapley
+
+Neural Shapley + 57-feature encoders are how papers assign off-ball credit from tracking.
+We already have chemistry, HAPM, 5-man James-Stein. The gap is **one** estimator (8.2) and
+an ablation (8.3 / #66), not a new attention network.
+
+- [ ] 12.9.1 Pairwise residual: `synergy(i,j) = RAPM(i,j together) − RAPM(i) − RAPM(j)` on
+  the unified 8.2 coefficients — after 8.2 exists
+- [ ] 12.9.2 Anti-synergy canary: two identical-archetype high-usage players together must
+  not beat additive RAPM on synthetic data
+- **Blocked on:** #65, #66. Overhaul: **small** after RAPM; **large** if a new network is
+  attempted instead. Do not build a Shapley attributor before 8.2.
+
+### Task 12.10 — Tracking / engine research (explicitly blocked)
+
+NNUE accumulators, MCTS 3–5s trajectory rollouts, Deep CFR for OOB plays, QRE-injected
+live trees, 25 Hz EPV. These require optical tracking we do not have.
+
+- [ ] 12.10.1 Data gate: document the minimum schema (10 players + ball, ≥5 Hz, shot clock)
+  in `code/pipeline/CANONICAL.md`. Until a season of that schema is on disk, this task
+  stays **wontfix / blocked**
+- [ ] 12.10.2 No prototype NNUE, no CFR trainer, no diffusion-MCTS in `code/pipeline/`
+- **Overhaul:** **research / extra-large**. Do not schedule.
+
+### Epic 12 anti-goals (in addition to the global anti-roadmap)
+
+- Do not port Stockfish / AlphaZero / Libratus into this repo without tracking data
+- Do not treat smoke ATS/ROI as a reason to add process features
+- Do not Optuna-tune EPVA windows on scoreboard seasons
+- Do not replace chemistry/HAPM with a second synergy stack before 8.2 unifies them
+- Do not start 12.5 / 12.7 / 12.9 ahead of their blockers
+- Do not claim walk-forward leak-proof from a green bench (unchanged)
+
+---
+
+## GitHub issue board (priority × overhaul)
+
+*Issues cannot be renumbered. Priority is the `priority:P*` label; size is `overhaul:*`.
+The ordered work queue is issue **#94** (tracking issue created 2026-09-19). Landed P0/Epic
+10/11 issues are closed, not left open as fake backlog.*
+
+| Rank | Do next | Overhaul | Why this rank |
+| ---- | ------- | -------- | ------------- |
+| P0 | #24 5.4 provenance, #57 P0.11 CLV | small–medium (data + loader) | Smoke: `tip_proxy`, 0 finite CLV. No market epic has a scoreboard until this moves |
+| P0 | #51 / #67 P0.5 Kalman | medium (rating update) | Fake RD is still in the live loop; 2.4 is a duplicate of 9.1 |
+| P1 | #91 FAST suite, then #58–#62 Epic 7.1–7.5 | small except 7.2 medium | Cheap ablation loop + remaining bench xfails; 7.6 already landed |
+| P2 | #65 8.2 RAPM, then #66 8.3, #68–#71 9.2–9.5, Epic 3 | 8.2 **large**; rest small–medium | Rating engine before new rolling features |
+| P3 | Epic 12.1–12.4, 12.8 (PBP process) | small–medium | After Kalman is in flight; uses shot zones we already have |
+| P4 | Epics 1–2 (except 2.4/2.2 dupes), 12.6=#33 | small–medium | Features on a non-broken rating |
+| P5 | Epics 4–5 except 5.4 | medium–large | Market layer after real quotes |
+| P6 | Epic 6 platform | small–medium | Does not move MAE/CLV |
+| blocked | 12.5, 12.7, 12.9, 12.10 | large / research | Explicit blockers in the task text |
+
+---
+
 ## Prediction-target map (what moves which metric)
 
 | Target | Highest-leverage tasks |
 |--------|------------------------|
 | **Spread MAE ↓** | 4.3 Huber loss, 3.2 recency-weighted margin baseline, 2.2 impact-weighted ratings, 3.3 per-team HCA, 1.3/1.4 lineup form |
-| **Winner accuracy ↑** | 4.1 GBM ensemble, 4.2 archetype clusters, 2.4 Kalman now-casting, 3.1 dual-window ratings, 3.4 season priors |
-| **Totals calibration ↑** | 5.6 totals decomposition + Skellam clusters, 1.6 tempo-dictation, 3.6 Markov game-flow, 4.4 Monte Carlo sims |
-| **CLV / ROI ↑** | 5.1 line shopping, 5.5 Venn-Abers bounds, 5.7 temporal de-vig, 5.8 CVaR staking, 5.3 composite mode |
+| **Winner accuracy ↑** | 4.1 GBM ensemble, 4.2 archetype clusters, 9.1 Kalman now-casting, 3.1 dual-window ratings, 3.4 season priors |
+| **Totals calibration ↑** | 5.6 totals decomposition + Skellam clusters, 1.6 tempo-dictation, 3.6/12.2 possession-origin Markov, 4.4 Monte Carlo sims |
+| **CLV / ROI ↑** | **5.4 real quotes first**, then 5.1 line shopping, 5.5 Venn-Abers bounds, 5.7 temporal de-vig, 5.8 CVaR staking, 5.3 composite mode |
+| **Process / luck split ↑** | 12.1 EPVA, 12.3 QRE-lite policy, 2.5/12.6 padding, 9.1 Kalman, 8.2 informed RAPM |
 | **Bug/leak catch ↑** | Epic 10 synthetic formula test bench (P0 battery, stage invariants, leak canaries) |
 
 ## Explicit non-goals (anti-roadmap)
@@ -1003,6 +1216,8 @@ From `code/README.md` / leak registry:
 - Do not treat bench-green as leak-proof — the bench proves known bug classes; walk-forward
   real-data evaluation proves the rest
 - Do not rebuild what exists (Venn-Abers, Skellam, de-vig, shot quality, past-only CV) — extend it
+- Do not port NNUE / MCTS / Deep CFR / neural Shapley without optical tracking on disk
+- Do not add Epic 12 process features on top of `tip_proxy` odds and then read ATS/ROI
 - Respect the ~65–72% winner-accuracy ceiling literature; chase calibration and CLV, not raw accuracy records
 
 ## Recently landed (kept for context)
@@ -1013,3 +1228,9 @@ From `code/README.md` / leak registry:
 - [x] Portfolio README, MIT license, `pyproject.toml`
 - [x] GitHub Actions CI (pytest + ruff) + MkDocs site
 - [x] Roadmap v2 research synthesis (12-agent literature + codebase audit)
+- [x] Epic 11 quick wins (P0.4, P0.6–P0.8, P0.10) + 4-way residual sign contract + schema 5
+- [x] Epic 10 bench (`pytest -m bench` green; 8 strict xfails pin 7.1–7.4 / 5.4 / P0.5)
+- [x] 7.6 min-sample floors (`MIN_CALIBRATION_SAMPLES=10`, `min_slice_n=5`)
+- [x] Hypothesis `importorskip` so missing dep skips properties instead of aborting the glob
+- [x] Smoke `20260919_183528_baseline_smoke_v5` (research-only, tip-proxy, 0 finite CLV) — do not promote
+- [x] Epic 12 written (PBP process / QRE-lite / leverage / FAST loop; tracking engines blocked)
