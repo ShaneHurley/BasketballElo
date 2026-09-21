@@ -54,12 +54,12 @@ jobs:
             -q --tb=short
 
       - name: Pytest (formula bench — Epic 10)
-        # Separate budget from leak/smoke. Path-scoped so collection does not
-        # pull unrelated modules. xfail(strict) tracks known P0 bugs;
-        # unexpected passes fail CI so fixed bugs cannot keep a stale xfail.
+        # Glob, not a file list: new test_bench_*.py files must not silently
+        # skip CI. Path-scoped so collection does not pull unrelated modules.
+        # xfail(strict) tracks known P0 bugs; unexpected passes fail CI so
+        # fixed bugs cannot keep a stale xfail. Coverage JSON is 10.7.3.
         run: |
-          python -m pytest \
-            tests/test_bench_factories.py \
-            tests/test_bench_p0_kelly.py \
-            tests/test_bench_p0_venn_abers.py \
-            -m bench -q --tb=short
+          mkdir -p output/bench
+          python -m pytest tests/test_bench_*.py -m bench --tb=short \
+            --cov=pipeline --cov-report=term-missing \
+            --cov-report=json:output/bench/coverage.json
