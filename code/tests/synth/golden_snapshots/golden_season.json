@@ -1,5 +1,5 @@
 {
-  "FEATURE_SCHEMA_VERSION": 6,
+  "FEATURE_SCHEMA_VERSION": 7,
   "payload": {
     "final_state": {
       "chemistry": {

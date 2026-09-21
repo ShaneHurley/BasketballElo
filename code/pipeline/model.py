@@ -398,6 +398,12 @@ LINEUP_COMPOSITE_COLS = [
 
 HAPM_COLS = ["h_hapm_net", "a_hapm_net", "hapm_net_diff"]
 
+RAPM_COLS = [
+    "h_rapm_net", "a_rapm_net", "rapm_net_diff",
+    "h_lrapm_net", "a_lrapm_net", "lrapm_net_diff",
+]
+
+
 EXTENDED_FEATURE_COLS = [
     "h_lineup5_off", "h_lineup5_def", "h_lineup5_chem", "a_lineup5_off", "a_lineup5_def", "a_lineup5_chem",
     "lineup5_net", "lineup5_chem_diff", "lineup5_sample_min",
@@ -408,6 +414,7 @@ EXTENDED_FEATURE_COLS = [
     *STRUCTURED_SCORE_COLS,
     *PACE_UNCERTAINTY_COLS,
     *HAPM_COLS,
+    *RAPM_COLS,
     "team_elo_spread", "team_elo_total_adj", "team_elo_net",
     "h_travel_miles_7d", "a_travel_miles_7d", "travel_miles_diff", "h_tz_shift", "a_tz_shift",
     "h_road_trip", "a_road_trip",

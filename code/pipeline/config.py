@@ -185,9 +185,9 @@ ARTIFACT_SCHEMA_VERSION = 3
 # boundaries).
 PREPROCESSING_SCHEMA_VERSION = 2
 # Bumped for Epic 9.1 / P0.5 scalar Kalman RD (player Elo updates).
-FEATURE_SCHEMA_VERSION = 6
-# Bumped for T-60 Phase 1: two-sided ML EV uses real away prices;
-# market_snapshots is the preferred tip/decision source.
+FEATURE_SCHEMA_VERSION = 7
+# Bumped for Epic 8.2/12.5: player RAPM + informed L-RAPM walk-forward features
+# (actuals-first; not market-blend).
 MARKET_SNAPSHOT_SCHEMA_VERSION = 3
 VALIDATION_SCHEMA_VERSION = 2
 # Freeze definition: predictions may use only data with source/ingestion

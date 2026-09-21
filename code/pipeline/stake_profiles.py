@@ -211,15 +211,39 @@ def robust_fractional_kelly(
     market_fair_p: float | None = None,
     uncertainty: float = 0.0,
     fraction: float = 0.25,
+    va_bounds: tuple[float, float] | None = None,
+    p0: float | None = None,
+    p1: float | None = None,
 ) -> float:
-    """Shrink ``p`` toward market fair / lower-bound before fractional Kelly.
+    """Lower-bound / robust fractional Kelly.
 
-    Task 045: greater ``uncertainty`` must never increase the recommended stake.
-    Full Kelly (fraction=1.0) is never the production default.
+    When Venn-Abers conformal bounds ``(p0, p1)`` (or ``va_bounds``) are
+    provided, EV and Kelly use **only** the lower bound ``p0``. If that lower
+    bound has non-positive EV vs ``decimal_odds``, return 0 (Pass).
+
+    Do **not** linearly scale the edge by interval width — width gating belongs
+    in the decision Pass filter (``VENN_ABERS_MAX_WIDTH``).
     """
     if fraction <= 0.0:
         return 0.0
     fraction = float(min(max(fraction, 0.0), 0.50))  # never full Kelly in production
+
+    if va_bounds is not None and len(va_bounds) >= 2:
+        p0 = float(va_bounds[0])
+        p1 = float(va_bounds[1])
+    if p0 is not None and np.isfinite(p0):
+        # Strict Lower-Bound Kelly: size only on p0
+        p_use = float(np.clip(p0, 0.0, 1.0))
+        b = float(decimal_odds) - 1.0 if decimal_odds is not None and np.isfinite(decimal_odds) else 0.0
+        if b <= 0.0:
+            return 0.0
+        # EV = p*b - (1-p); Pass when EV <= 0
+        ev = p_use * b - (1.0 - p_use)
+        if ev <= 0.0:
+            return 0.0
+        f_star = kelly_fraction(p_use, decimal_odds)
+        return float(max(0.0, f_star * fraction))
+
     p = float(p) if p is not None and np.isfinite(p) else 0.0
     unc = float(max(0.0, uncertainty or 0.0))
     # Posterior lower bound: subtract uncertainty mass from p.
