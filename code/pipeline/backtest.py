@@ -59,6 +59,7 @@ from pipeline.travel import TravelTracker
 from pipeline.refs import RefTracker
 from pipeline.shot_quality import ShotQualityTracker
 from pipeline.hapm import HapmPriorTracker, hapm_lookup_for_training
+from pipeline.rapm import PlayerRapmTracker, LineupRapmTracker, _RapmBundle
 from pipeline.epm_priors import EpmPriorTracker
 from pipeline.features import generate_features
 from pipeline.model import (
@@ -221,6 +222,7 @@ def run_multi_year_backtest_walkforward(
     fast_tuning: bool = False,
     require_elo_agreement: bool = False,
     use_hapm_priors: bool = False,
+    use_rapm_priors: bool = False,
     rating_history_use_all: bool | None = None,
     use_venn_abers_filter: bool | None = None,
 ) -> pd.DataFrame:
@@ -380,6 +382,22 @@ def run_multi_year_backtest_walkforward(
             )
             base_hapm.fit(hist_for_hapm)
         hapm_train_lookup = hapm_lookup_for_training(train_stints) if use_hapm_priors else None
+        base_rapm = None
+        if use_rapm_priors:
+            hist_for_rapm = (
+                stints_df[stints_df["season"].isin(rating_history_seasons)].copy()
+                if rating_history_seasons else train_stints
+            )
+            player_rapm = PlayerRapmTracker(league_xppp=DEFAULT_LEAGUE_XPPP)
+            player_rapm.fit(hist_for_rapm)
+            if player_rapm.fitted:
+                lineup_rapm = LineupRapmTracker(player_rapm, league_xppp=DEFAULT_LEAGUE_XPPP)
+                lineup_rapm.fit(hist_for_rapm)
+                base_rapm = _RapmBundle(
+                    player_rapm, lineup_rapm if lineup_rapm.fitted else None
+                )
+            else:
+                base_rapm = player_rapm
         base_epm = EpmPriorTracker()
 
         # Warm-start engines on earlier seasons (ratings only; features discarded).
@@ -395,6 +413,7 @@ def run_multi_year_backtest_walkforward(
                 ref_tracker=base_ref,
                 shot_quality_tracker=base_shot_quality,
                 hapm_tracker=None,  # past-only lookup is for model-train rows only
+                rapm_tracker=None,
             )
 
         base_features = generate_features(
@@ -407,6 +426,7 @@ def run_multi_year_backtest_walkforward(
             ref_tracker=base_ref,
             shot_quality_tracker=base_shot_quality,
             hapm_tracker=hapm_train_lookup,
+            rapm_tracker=base_rapm if use_rapm_priors else None,
         )
         base_features = engineer_interaction_features(base_features)
 
@@ -423,6 +443,7 @@ def run_multi_year_backtest_walkforward(
         calib_ref = copy.deepcopy(base_ref)
         calib_shot_quality = copy.deepcopy(base_shot_quality)
         calib_hapm = copy.deepcopy(base_hapm)
+        calib_rapm = copy.deepcopy(base_rapm) if base_rapm is not None else None
         calib_epm = copy.deepcopy(base_epm)
 
         calib_features = generate_features(
@@ -439,6 +460,7 @@ def run_multi_year_backtest_walkforward(
             # so `hapm_train_lookup` still resolves every game to a tracker
             # fit only on strictly-earlier blocks.
             hapm_tracker=hapm_train_lookup,
+            rapm_tracker=base_rapm if use_rapm_priors else None,
         )
         calib_features = engineer_interaction_features(calib_features)
 
@@ -846,6 +868,7 @@ def run_multi_year_backtest_walkforward(
         sim_ref = copy.deepcopy(calib_ref)
         sim_shot_quality = copy.deepcopy(calib_shot_quality)
         sim_hapm = copy.deepcopy(calib_hapm)
+        sim_rapm = copy.deepcopy(calib_rapm) if calib_rapm is not None else None
         sim_vol = TeamVolatilityTracker()
         sim_epm = copy.deepcopy(calib_epm)
 
@@ -1041,6 +1064,7 @@ def run_multi_year_backtest_walkforward(
             ref_tracker=sim_ref,
             shot_quality_tracker=sim_shot_quality,
             hapm_tracker=sim_hapm if use_hapm_priors else None,
+            rapm_tracker=sim_rapm if use_rapm_priors else None,
             min_edge_pts=edge_thr,
             max_favorite_decimal=fav_dec,
             ou_min_edge=ou_thr,

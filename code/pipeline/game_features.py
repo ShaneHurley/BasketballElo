@@ -71,6 +71,7 @@ def build_game_features(
     ref_tracker=None,
     shot_quality_tracker=None,
     hapm_tracker=None,
+    rapm_tracker=None,
     league_rolling_stats=None,
     hierarchical_pace=None,
     hier_shot_rates=None,
@@ -498,6 +499,11 @@ def build_game_features(
         feat.update(hapm_tracker.feature_dict(home_lineup, away_lineup, game_id=game_id))
     else:
         feat.setdefault("hapm_net_diff", 0.0)
+    if rapm_tracker is not None and getattr(rapm_tracker, "fitted", False):
+        feat.update(rapm_tracker.feature_dict(home_lineup, away_lineup, game_id=game_id))
+    else:
+        feat.setdefault("rapm_net_diff", 0.0)
+        feat.setdefault("lrapm_net_diff", 0.0)
     if team_elo_tracker is not None:
         feat.update(team_elo_tracker.feature_dict(home_team, away_team))
     if travel_tracker is not None:
