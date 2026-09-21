@@ -66,6 +66,14 @@ def test_selection_bias_paths():
     ok, msg = compare_to_baseline({"mae_mean": 1.0}, {"mae_mean": 1.0})
     assert ok
     ok2, _ = compare_to_baseline({"mae_mean": 2.0}, {"mae_mean": 1.0}, mae_tol=0.25)
+    # Flat stability dict uses spread_mae_mean (seeded rapm_v7 baseline shape).
+    ok3, msg3 = compare_to_baseline(
+        {"mae_mean": 11.50, "ece_mean": 0.07},
+        {"spread_mae_mean": 11.15, "ece_mean": 0.073},
+        mae_tol=0.25,
+    )
+    assert ok3 is False
+    assert "MAE" in msg3
     assert not ok2
 
 
