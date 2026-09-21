@@ -40,6 +40,7 @@ def update_trackers_after_game(
     ref_tracker=None,
     shot_quality_tracker=None,
     hapm_tracker=None,
+    epva_tracker=None,
     hierarchical_pace=None,
     hier_shot_rates=None,
     minutes_model=None,
@@ -236,6 +237,18 @@ def update_trackers_after_game(
         from pipeline.shot_quality import shot_quality_stats_from_gs
         shot_quality_tracker.update(home, gdate, current_season, shot_quality_stats_from_gs(gs, "home"))
         shot_quality_tracker.update(away, gdate, current_season, shot_quality_stats_from_gs(gs, "away"))
+
+    if epva_tracker is not None and gs:
+        from pipeline.epva import epva_from_gs_side
+        for team, side in ((home, "home"), (away, "away")):
+            agg = epva_from_gs_side(gs, side)
+            if int(agg.get("n_attempts", 0) or 0) > 0:
+                epva_tracker.update_game(
+                    team,
+                    decision=float(agg["decision"]),
+                    execution=float(agg["execution"]),
+                    n_attempts=int(agg["n_attempts"]),
+                )
 
     if rotation_tracker is not None:
         h_poss = defaultdict(float)

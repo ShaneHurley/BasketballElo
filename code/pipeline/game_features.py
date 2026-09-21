@@ -72,6 +72,7 @@ def build_game_features(
     shot_quality_tracker=None,
     hapm_tracker=None,
     rapm_tracker=None,
+    epva_tracker=None,
     league_rolling_stats=None,
     hierarchical_pace=None,
     hier_shot_rates=None,
@@ -504,6 +505,16 @@ def build_game_features(
     else:
         feat.setdefault("rapm_net_diff", 0.0)
         feat.setdefault("lrapm_net_diff", 0.0)
+    if epva_tracker is not None:
+        feat.update(epva_tracker.feature_dict(home_team, away_team))
+    else:
+        # Keep schema stable when EPVA is gated off (zeros; cols often dropped upstream).
+        for _k in (
+            "h_epva_decision", "a_epva_decision",
+            "h_epva_execution", "a_epva_execution",
+            "h_epva", "a_epva", "epva_diff", "epva_sample_min",
+        ):
+            feat.setdefault(_k, 0.0)
     if team_elo_tracker is not None:
         feat.update(team_elo_tracker.feature_dict(home_team, away_team))
     if travel_tracker is not None:

@@ -60,6 +60,7 @@ from pipeline.refs import RefTracker
 from pipeline.shot_quality import ShotQualityTracker
 from pipeline.hapm import HapmPriorTracker, hapm_lookup_for_training
 from pipeline.rapm import PlayerRapmTracker, LineupRapmTracker, _RapmBundle
+from pipeline.epva import EpvaTracker
 from pipeline.epm_priors import EpmPriorTracker
 from pipeline.features import generate_features
 from pipeline.model import (
@@ -223,6 +224,7 @@ def run_multi_year_backtest_walkforward(
     require_elo_agreement: bool = False,
     use_hapm_priors: bool = False,
     use_rapm_priors: bool = False,
+    use_epva_features: bool | None = None,
     rating_history_use_all: bool | None = None,
     use_venn_abers_filter: bool | None = None,
 ) -> pd.DataFrame:
@@ -238,6 +240,20 @@ def run_multi_year_backtest_walkforward(
     use_all_rating = (
         RATING_HISTORY_USE_ALL if rating_history_use_all is None else bool(rating_history_use_all)
     )
+    from pipeline.config import USE_EPVA_FEATURES
+    from pipeline.model import SAFE_FEATURE_COLS, EPVA_COLS
+
+    if use_epva_features is None:
+        use_epva_features = bool(USE_EPVA_FEATURES)
+    # When EPVA is gated off, drop EPVA cols from SAFE *and* from any explicit
+    # feature_cols subset. Otherwise ablation arms that pass feature_cols still
+    # keep dead zero-filled EPVA columns (tracker is None) and pollute Optuna.
+    if not use_epva_features:
+        ban = set(EPVA_COLS)
+        if feature_cols is None:
+            feature_cols = [c for c in SAFE_FEATURE_COLS if c not in ban]
+        else:
+            feature_cols = [c for c in feature_cols if c not in ban]
     if n_tuning_trials_meta_win is None:
         n_tuning_trials_meta_win = min(n_tuning_trials_meta, 25)
     stints_df = stints_df.copy()
@@ -398,6 +414,14 @@ def run_multi_year_backtest_walkforward(
                 )
             else:
                 base_rapm = player_rapm
+        base_epva = None
+        if use_epva_features:
+            from pipeline.config import EPVA_SHRINK_K, EPVA_CONTINUITY_HALF_LIFE_DAYS
+            base_epva = EpvaTracker(
+                days_since_prior=120.0,
+                shrink_k=float(EPVA_SHRINK_K),
+                continuity_half_life_days=float(EPVA_CONTINUITY_HALF_LIFE_DAYS),
+            )
         base_epm = EpmPriorTracker()
 
         # Warm-start engines on earlier seasons (ratings only; features discarded).
@@ -414,7 +438,11 @@ def run_multi_year_backtest_walkforward(
                 shot_quality_tracker=base_shot_quality,
                 hapm_tracker=None,  # past-only lookup is for model-train rows only
                 rapm_tracker=None,
+                epva_tracker=base_epva,
             )
+            if base_epva is not None:
+                base_epva.seed_priors_from_history()
+                base_epva.bump_offseason(120.0)
 
         base_features = generate_features(
             base_stints, base_hier, base_elo, base_pace,
@@ -427,6 +455,7 @@ def run_multi_year_backtest_walkforward(
             shot_quality_tracker=base_shot_quality,
             hapm_tracker=hapm_train_lookup,
             rapm_tracker=base_rapm if use_rapm_priors else None,
+            epva_tracker=base_epva,
         )
         base_features = engineer_interaction_features(base_features)
 
@@ -444,6 +473,7 @@ def run_multi_year_backtest_walkforward(
         calib_shot_quality = copy.deepcopy(base_shot_quality)
         calib_hapm = copy.deepcopy(base_hapm)
         calib_rapm = copy.deepcopy(base_rapm) if base_rapm is not None else None
+        calib_epva = copy.deepcopy(base_epva)
         calib_epm = copy.deepcopy(base_epm)
 
         calib_features = generate_features(
@@ -461,6 +491,7 @@ def run_multi_year_backtest_walkforward(
             # fit only on strictly-earlier blocks.
             hapm_tracker=hapm_train_lookup,
             rapm_tracker=base_rapm if use_rapm_priors else None,
+            epva_tracker=calib_epva,
         )
         calib_features = engineer_interaction_features(calib_features)
 
@@ -869,6 +900,7 @@ def run_multi_year_backtest_walkforward(
         sim_shot_quality = copy.deepcopy(calib_shot_quality)
         sim_hapm = copy.deepcopy(calib_hapm)
         sim_rapm = copy.deepcopy(calib_rapm) if calib_rapm is not None else None
+        sim_epva = copy.deepcopy(calib_epva)
         sim_vol = TeamVolatilityTracker()
         sim_epm = copy.deepcopy(calib_epm)
 
@@ -885,6 +917,10 @@ def run_multi_year_backtest_walkforward(
                 rotation_tracker=sim_rotation,
                 prior_rosters={},
             )
+            if sim_epva is not None:
+                sim_epva.seed_priors_from_history()
+                sim_epva.bump_offseason(120.0)
+
 
         # Walk-forward thresholds from prior seasons
         edge_thr = 0.0 if not uses_edge_gates() else GOOD_BET_EDGE
@@ -1065,6 +1101,7 @@ def run_multi_year_backtest_walkforward(
             shot_quality_tracker=sim_shot_quality,
             hapm_tracker=sim_hapm if use_hapm_priors else None,
             rapm_tracker=sim_rapm if use_rapm_priors else None,
+            epva_tracker=sim_epva,
             min_edge_pts=edge_thr,
             max_favorite_decimal=fav_dec,
             ou_min_edge=ou_thr,

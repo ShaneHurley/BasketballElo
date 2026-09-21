@@ -186,8 +186,8 @@ ARTIFACT_SCHEMA_VERSION = 3
 PREPROCESSING_SCHEMA_VERSION = 2
 # Bumped for Epic 9.1 / P0.5 scalar Kalman RD (player Elo updates).
 FEATURE_SCHEMA_VERSION = 7
-# Bumped for Epic 8.2/12.5: player RAPM + informed L-RAPM walk-forward features
-# (actuals-first; not market-blend).
+# Bumped for Epic 8.2/12.5/12.1: player RAPM + informed L-RAPM + zone EPVA
+# walk-forward features (actuals-first; not market-blend).
 MARKET_SNAPSHOT_SCHEMA_VERSION = 3
 VALIDATION_SCHEMA_VERSION = 2
 # Freeze definition: predictions may use only data with source/ingestion
@@ -257,6 +257,12 @@ CONFIDENCE_SCORE_SOFT_MAX = 85.0
 CONFIDENCE_PROB_TEMPERATURE = 1.15
 # Heteroscedastic cover σ: max(conf_width/2.5, scale * MATCHUP_VOL_SIGMA, 4).
 USE_MATCHUP_VOL_FOR_COVER = True
+# Epic 12.1: live zone-EPVA features. Default off — v8 showed ECE gain but MAE
+# regression vs rapm_v7; enable only behind --use-epva / ablation evidence.
+USE_EPVA_FEATURES = False
+# When EPVA is on, larger shrink_k + longer continuity half-life damp Game-1 shocks.
+EPVA_SHRINK_K = 75.0
+EPVA_CONTINUITY_HALF_LIFE_DAYS = 120.0
 MATCHUP_VOL_SIGMA_COVER_SCALE = 1.0
 # Optional scenario-mixture std as another cover-σ floor when available.
 USE_SCENARIO_MIX_SIGMA_FOR_COVER = True

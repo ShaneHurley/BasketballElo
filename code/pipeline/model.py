@@ -403,6 +403,12 @@ RAPM_COLS = [
     "h_lrapm_net", "a_lrapm_net", "lrapm_net_diff",
 ]
 
+EPVA_COLS = [
+    "h_epva_decision", "a_epva_decision",
+    "h_epva_execution", "a_epva_execution",
+    "h_epva", "a_epva", "epva_diff", "epva_sample_min",
+]
+
 
 EXTENDED_FEATURE_COLS = [
     "h_lineup5_off", "h_lineup5_def", "h_lineup5_chem", "a_lineup5_off", "a_lineup5_def", "a_lineup5_chem",
@@ -415,6 +421,7 @@ EXTENDED_FEATURE_COLS = [
     *PACE_UNCERTAINTY_COLS,
     *HAPM_COLS,
     *RAPM_COLS,
+    *EPVA_COLS,
     "team_elo_spread", "team_elo_total_adj", "team_elo_net",
     "h_travel_miles_7d", "a_travel_miles_7d", "travel_miles_diff", "h_tz_shift", "a_tz_shift",
     "h_road_trip", "a_road_trip",
