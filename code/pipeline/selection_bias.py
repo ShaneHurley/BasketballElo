@@ -87,9 +87,20 @@ def compare_to_baseline(
     if not baseline:
         return True, "no baseline — first suite path; store review_baseline.json"
     cur_mae = current.get("mae_mean", current.get("spread_mae_mean"))
-    base_mae = baseline.get("mae_mean") or (baseline.get("stability") or {}).get("spread_mae_mean")
-    cur_ece = current.get("ece_mean")
-    base_ece = baseline.get("ece_mean") or (baseline.get("stability") or {}).get("ece_mean")
+    # Accept either a flat stability dict (spread_mae_mean) or a nested review payload.
+    base_mae = (
+        baseline.get("mae_mean")
+        if baseline.get("mae_mean") is not None
+        else baseline.get("spread_mae_mean")
+    )
+    if base_mae is None:
+        base_mae = (baseline.get("stability") or {}).get("spread_mae_mean")
+    cur_ece = current.get("ece_mean", current.get("ece"))
+    base_ece = (
+        baseline.get("ece_mean")
+        if baseline.get("ece_mean") is not None
+        else (baseline.get("stability") or {}).get("ece_mean")
+    )
     msgs = []
     ok = True
     if (

@@ -897,6 +897,7 @@ def run_simulation(
 
         from pipeline.config import VENN_ABERS_MAX_WIDTH
         va_ml_interval = None
+        va_w = None
         if (
             use_venn_abers_filter
             and confidence_calibrator is not None
@@ -907,14 +908,14 @@ def run_simulation(
         ):
             va_score = conf_score
             if isinstance(va_score, (int, float)):
-                va_w = None
                 if hasattr(confidence_calibrator, "venn_abers_interval"):
                     va_iv = confidence_calibrator.venn_abers_interval(float(va_score))
                     if va_iv is not None:
-                        va_ml_interval = (va_iv[0], va_iv[1])
-                        va_w = va_iv[2]
+                        va_ml_interval = (float(va_iv[0]), float(va_iv[1]))
+                        va_w = float(va_iv[2]) if len(va_iv) > 2 else float(va_iv[1] - va_iv[0])
                 elif hasattr(confidence_calibrator, "venn_abers_width"):
                     va_w = confidence_calibrator.venn_abers_width(float(va_score))
+                # Max-width gate: Pass regardless of p0 EV; never linear-scale edge.
                 if (
                     direction != "Pass"
                     and va_w is not None
@@ -988,6 +989,33 @@ def run_simulation(
             confidence_tier=ba.get("ml_confidence_tier", conf_tier),
             max_favorite_decimal=max_favorite_decimal,
         )
+        # Lower-Bound Kelly when VA interval is available (p0 only; EV<=0 → 0).
+        if va_ml_interval is not None and ml_dir != "Pass" and pd.notna(market_ml):
+            from pipeline.stake_profiles import robust_fractional_kelly
+            from pipeline.market import american_to_decimal
+            p0, p1 = va_ml_interval
+            try:
+                dec_odds = float(american_to_decimal(float(market_ml)))
+            except Exception:
+                dec_odds = float("nan")
+            if np.isfinite(dec_odds):
+                # For Away bets, lower-bound the away-win probability ≈ 1 - p1
+                # when interval is on P(home); use p0 for Home.
+                if ml_dir == "Home":
+                    ml_kelly = robust_fractional_kelly(
+                        preds.get("win_prob", 0.5),
+                        dec_odds,
+                        va_bounds=(p0, p1),
+                    )
+                else:
+                    # Away: conformal lower bound on P(away) = 1 - p1
+                    ml_kelly = robust_fractional_kelly(
+                        1.0 - preds.get("win_prob", 0.5),
+                        dec_odds,
+                        va_bounds=(max(0.0, 1.0 - p1), max(0.0, 1.0 - p0)),
+                    )
+                if ml_kelly <= 0.0:
+                    ml_dir = "Pass"
 
         pred_total_val = preds.get("pred_total", 0)
         total_edge = pred_total_val - float(market_total) if pd.notna(market_total) and market_total else 0.0
@@ -1191,6 +1219,9 @@ def run_simulation(
             "P_BLOWOUT_15": round(float(blowout_probs.get(15, blowout_probs.get("15", np.nan))), 3) if blowout_probs else np.nan,
             "P_BLOWOUT_20": round(float(blowout_probs.get(20, blowout_probs.get("20", np.nan))), 3) if blowout_probs else np.nan,
             "VOL_STAKE_MULT": round(vol_mult, 3),
+            "VENN_ABERS_WIDTH": round(float(va_w), 4) if va_w is not None and np.isfinite(va_w) else np.nan,
+            "VA_P0": round(float(va_ml_interval[0]), 4) if va_ml_interval is not None else np.nan,
+            "VA_P1": round(float(va_ml_interval[1]), 4) if va_ml_interval is not None else np.nan,
             "MODEL_ML_CORRECT": int((preds.get("win_prob", 0.5) > 0.5) == (act_h - act_a > 0)),
             "TOTAL_ERR": round(preds.get("pred_total", 0) - (act_h + act_a), 2),
         }
