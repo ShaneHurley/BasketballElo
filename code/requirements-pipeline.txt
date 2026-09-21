@@ -12,6 +12,9 @@ catboost>=1.2
 tqdm>=4.65
 matplotlib>=3.7
 scipy>=1.10
+# Property tests (test_bench_properties.py) — also in requirements-dev.txt;
+# listed here so suite/bench envs that only install pipeline still collect.
+hypothesis>=6.0
 #
 # Optional (scored as bonus; lightgbm only used when use_lightgbm_base=True):
 requests>=2.28
